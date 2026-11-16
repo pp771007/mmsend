@@ -12,6 +12,7 @@ use crate::APP_NAME;
 use crate::api::{ApiError, NewPost};
 use crate::console;
 use crate::favorites;
+use crate::gui;
 use crate::session::{Error, Session};
 use crate::store::{self, SendRecord};
 use crate::target::Target;
@@ -53,6 +54,9 @@ const SUMMARY_CHARS: usize = 60;
 const STDIN_MARKER: &str = "-";
 /// What cmd users type out of habit; it would otherwise be sent as a message.
 const WINDOWS_HELP_FLAG: &str = "/?";
+/// `mmsend login`. Every send names a recipient first, so a bare first argument
+/// can never have been meant as a message.
+const LOGIN_COMMAND: &str = "login";
 
 /// Hand-aligned (CJK characters are two columns wide).
 const HELP_TEMPLATE: &str = "\
@@ -66,6 +70,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend --user <帳號> --file 訊息.txt  從文字檔讀取訊息（適用於多行或含雙引號）
   mmsend --user <帳號> --attach <檔案>  附加檔案，可同時加上訊息
   <其他指令> | mmsend --user <帳號>     傳送其他指令的輸出
+  mmsend login                          開啟登入視窗，登入後自動關閉
   mmsend                                開啟設定視窗
 
 參數：
@@ -191,6 +196,9 @@ pub fn run() -> ExitCode {
         let _ = command().print_help();
         return ExitCode::SUCCESS;
     }
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == LOGIN_COMMAND) {
+        return login();
+    }
     let mut record = SendRecord::starting_now();
     let args = match parse_args() {
         Ok(args) => args,
@@ -224,6 +232,24 @@ pub fn run() -> ExitCode {
     };
     log(&record);
     code
+}
+
+/// Waits while the person logs in; the caller only ever sees the outcome, never the password.
+fn login() -> ExitCode {
+    let failure = match gui::run_login() {
+        Ok(true) => match store::load_config() {
+            Ok(Some(config)) => {
+                println!("已登入 @{}（{}）", config.username, config.server_url.trim_end_matches('/'));
+                return ExitCode::SUCCESS;
+            }
+            Ok(None) => Failure::new(EXIT_OTHER, "登入資料未能儲存"),
+            Err(e) => Failure::new(EXIT_OTHER, e),
+        },
+        Ok(false) => Failure::new(EXIT_NOT_LOGGED_IN, "登入視窗已關閉，尚未登入"),
+        Err(e) => Failure::new(EXIT_OTHER, e),
+    };
+    eprintln!("{}", failure.message);
+    ExitCode::from(failure.code)
 }
 
 fn log(record: &SendRecord) {

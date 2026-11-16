@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -117,29 +118,7 @@ const FILTER_CHOICES: [(Filter, &str); 3] = [
 ];
 
 pub fn run() -> ExitCode {
-    let icon = egui::IconData {
-        rgba: icon::rgba(WINDOW_ICON_SIZE),
-        width: WINDOW_ICON_SIZE,
-        height: WINDOW_ICON_SIZE,
-    };
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(format!("{APP_NAME} v{}", Version::current()))
-            .with_inner_size(WINDOW_SIZE)
-            .with_min_inner_size(WINDOW_MIN_SIZE)
-            .with_icon(icon),
-        ..Default::default()
-    };
-    let result = eframe::run_native(
-        install::COMMAND_NAME,
-        options,
-        Box::new(|cc| {
-            install_cjk_font(&cc.egui_ctx);
-            theme::install(&cc.egui_ctx);
-            Ok(Box::new(App::new(cc.egui_ctx.clone(), cc.storage)))
-        }),
-    );
-    match result {
+    match open_window(None) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // The console is already detached when double-clicked, so stderr goes nowhere.
@@ -147,6 +126,47 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `mmsend login`: only the login screen, closed as soon as the login succeeds, so
+/// a script or an AI agent can have the person log in without ever handling the
+/// password itself. `Ok(true)`: logged in; `Ok(false)`: the window was closed first.
+pub fn run_login() -> Result<bool, String> {
+    let logged_in = Arc::new(AtomicBool::new(false));
+    open_window(Some(logged_in.clone())).map_err(|e| format!("無法開啟視窗：{e}"))?;
+    Ok(logged_in.load(Ordering::SeqCst))
+}
+
+/// `login_only`: set once the login succeeds; `None` opens the full settings window.
+fn open_window(login_only: Option<Arc<AtomicBool>>) -> Result<(), eframe::Error> {
+    let icon = egui::IconData {
+        rgba: icon::rgba(WINDOW_ICON_SIZE),
+        width: WINDOW_ICON_SIZE,
+        height: WINDOW_ICON_SIZE,
+    };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(format!("{APP_NAME} v{}", Version::current()))
+        .with_inner_size(WINDOW_SIZE)
+        .with_min_inner_size(WINDOW_MIN_SIZE)
+        .with_icon(icon);
+    if login_only.is_some() {
+        // Windows will not let a background process take the focus, so the window
+        // would open behind whatever the person is using while the command waits.
+        viewport = viewport.with_window_level(egui::WindowLevel::AlwaysOnTop);
+    }
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    eframe::run_native(
+        install::COMMAND_NAME,
+        options,
+        Box::new(|cc| {
+            install_cjk_font(&cc.egui_ctx);
+            theme::install(&cc.egui_ctx);
+            Ok(Box::new(App::new(cc.egui_ctx.clone(), cc.storage, login_only)))
+        }),
+    )
 }
 
 fn show_fatal_error(message: &str) {
@@ -678,6 +698,8 @@ struct App {
     /// The send log, while its dialog is open.
     history: Option<Result<Vec<SendRecord>, String>>,
     uninstall: UninstallStep,
+    /// `mmsend login`: set on success, then the window closes instead of opening the main view.
+    login_only: Option<Arc<AtomicBool>>,
 }
 
 /// eframe's (private) storage key for the window's position and size.
@@ -695,7 +717,7 @@ struct SavedGeometry {
 }
 
 impl App {
-    fn new(ctx: egui::Context, storage: Option<&dyn eframe::Storage>) -> Self {
+    fn new(ctx: egui::Context, storage: Option<&dyn eframe::Storage>, login_only: Option<Arc<AtomicBool>>) -> Self {
         let (tx, rx) = mpsc::channel();
         let logo_pixels = (LOGO_SIZE * 2.0) as u32; // sharp on 200% displays
         let logo = ctx.load_texture(
@@ -721,7 +743,14 @@ impl App {
             window_geometry: storage.and_then(|s| s.get_string(EFRAME_WINDOW_KEY)),
             history: None,
             uninstall: UninstallStep::Idle,
+            login_only,
         };
+        if app.login_only.is_some() {
+            // Shown even when a session exists: logging in again is how to switch
+            // accounts or replace a changed password.
+            app.screen = Screen::Login(LoginForm::prefilled(None));
+            return app;
+        }
         match Session::load() {
             Ok(session) => app.enter_main(session),
             Err(Error::NotLoggedIn) => app.screen = Screen::Login(LoginForm::prefilled(None)),
@@ -837,7 +866,13 @@ impl App {
                 continue;
             }
             match (msg, &mut self.screen) {
-                (Msg::LoggedIn(Ok(session)), Screen::Login(_)) => self.enter_main(*session),
+                (Msg::LoggedIn(Ok(session)), Screen::Login(_)) => match &self.login_only {
+                    Some(logged_in) => {
+                        logged_in.store(true, Ordering::SeqCst);
+                        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    None => self.enter_main(*session),
+                },
                 (Msg::LoggedIn(Err(e)), Screen::Login(form)) => form.show_error(&e),
                 (Msg::Loaded(Ok(directory)), Screen::Main(view)) => {
                     view.directory = Some(directory);
