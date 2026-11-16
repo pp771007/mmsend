@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::error::{ContextKind, ErrorKind};
-use clap::{ArgAction, ArgGroup, CommandFactory, FromArgMatches, Parser};
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
 
 use crate::APP_NAME;
 use crate::api::{ApiError, NewPost};
@@ -70,6 +70,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend login                          開啟登入視窗，登入後自動關閉
   mmsend status                         顯示版本、安裝與登入狀態
   mmsend find <關鍵字>                  以姓名、帳號或頻道名稱尋找收件對象
+  mmsend alias                          列出或設定別名（mmsend alias -h）
   mmsend                                開啟設定視窗
 
 參數：
@@ -92,27 +93,9 @@ const EXAMPLES: &str = "\
     disable_help_flag = true,
     disable_version_flag = true
 )]
-#[command(group(ArgGroup::new("target").required(true).args(["user", "channel", "group", "to", "channel_id"])))]
 struct Args {
-    /// 傳送私訊給指定的 Mattermost 帳號
-    #[arg(long, value_name = "帳號")]
-    user: Option<String>,
-
-    /// 傳送至頻道，使用網址中的名稱，例如 dev/town-square
-    #[arg(long, value_name = "團隊/頻道")]
-    channel: Option<String>,
-
-    /// 傳送至群組，列出除您以外的成員帳號，例如 alice,bob
-    #[arg(long, value_name = "帳號,帳號")]
-    group: Option<String>,
-
-    /// 傳送給在設定視窗釘選時取的別名
-    #[arg(long, value_name = "別名")]
-    to: Option<String>,
-
-    /// Raw channel id; kept for scripts written before --group existed.
-    #[arg(long, value_name = "ID", hide = true)]
-    channel_id: Option<String>,
+    #[command(flatten)]
+    target: TargetArgs,
 
     /// 從文字檔讀取訊息
     #[arg(long, value_name = "檔案", conflicts_with = "message")]
@@ -143,6 +126,31 @@ struct Args {
     message: Option<String>,
 }
 
+/// Who to send to; also what `mmsend alias set` points an alias at.
+#[derive(clap::Args)]
+#[group(id = "target", required = true, multiple = false)]
+pub(crate) struct TargetArgs {
+    /// 傳送私訊給指定的 Mattermost 帳號
+    #[arg(long, value_name = "帳號")]
+    user: Option<String>,
+
+    /// 傳送至頻道，使用網址中的名稱，例如 dev/town-square
+    #[arg(long, value_name = "團隊/頻道")]
+    channel: Option<String>,
+
+    /// 傳送至群組，列出除您以外的成員帳號，例如 alice,bob
+    #[arg(long, value_name = "帳號,帳號")]
+    group: Option<String>,
+
+    /// 傳送給在設定視窗釘選時取的別名
+    #[arg(long, value_name = "別名")]
+    to: Option<String>,
+
+    /// Raw channel id; kept for scripts written before --group existed.
+    #[arg(long, value_name = "ID", hide = true)]
+    channel_id: Option<String>,
+}
+
 fn command() -> clap::Command {
     let exit_codes: String = EXIT_CODES
         .iter()
@@ -165,11 +173,12 @@ pub(crate) fn usage_failure(error: &clap::Error) -> Failure {
         .map(|value| value.to_string())
         .unwrap_or_default();
     let problem = match error.kind() {
-        // A missing positional (`mmsend find` without a keyword) shows as `<關鍵字>...`.
-        ErrorKind::MissingRequiredArgument if arg.starts_with('<') => {
-            format!("缺少{}", arg.trim_end_matches('.'))
+        // The recipient group shows as `<--user <帳號>|--channel ...>`, a missing
+        // positional (`mmsend find` without a keyword) as `<關鍵字>...`.
+        ErrorKind::MissingRequiredArgument if arg.contains("--user") => {
+            "請指定收件對象：--user、--channel、--group 或 --to".to_owned()
         }
-        ErrorKind::MissingRequiredArgument => "請指定收件對象：--user、--channel、--group 或 --to".to_owned(),
+        ErrorKind::MissingRequiredArgument => format!("缺少{}", arg.trim_end_matches('.')),
         ErrorKind::ArgumentConflict => {
             "參數衝突：收件對象只能指定一個，訊息與 --file 也只能擇一".to_owned()
         }
@@ -222,6 +231,7 @@ pub fn run() -> ExitCode {
         Some(subcommands::LOGIN) => return report(subcommands::login()),
         Some(subcommands::STATUS) => return report(subcommands::status()),
         Some(subcommands::FIND) => return report(subcommands::find()),
+        Some(subcommands::ALIAS) => return report(subcommands::alias()),
         _ => {}
     }
     let mut record = SendRecord::starting_now();
@@ -265,7 +275,7 @@ pub fn run() -> ExitCode {
 
 /// Everything a send checks, without sending: who it goes to by name, and what.
 fn dry_run(args: &Args) -> Result<String, Failure> {
-    let target = parse_target(args)?;
+    let target = parse_target(&args.target)?;
     let outgoing = compose(read_message(args)?, args.code, read_attachments(&args.attach)?)?;
     let mut session = Session::load().map_err(|e| session_failure(e, &target))?;
     let recipient = with_retries(|| target.look_up(&mut session)).map_err(|e| session_failure(e, &target))?;
@@ -314,7 +324,7 @@ fn summarize(outgoing: &Outgoing) -> String {
 
 /// Returns who it went to, by name.
 fn send(args: Args, record: &mut SendRecord) -> Result<String, Failure> {
-    let target = parse_target(&args)?;
+    let target = parse_target(&args.target)?;
     record.target = target.to_string();
     let outgoing = compose(read_message(&args)?, args.code, read_attachments(&args.attach)?)?;
     record.summary = summarize(&outgoing);
@@ -426,7 +436,7 @@ pub(crate) fn with_retries<T>(mut attempt: impl FnMut() -> Result<T, Error>) -> 
     }
 }
 
-fn parse_target(args: &Args) -> Result<Target, Failure> {
+pub(crate) fn parse_target(args: &TargetArgs) -> Result<Target, Failure> {
     if let Some(alias) = &args.to {
         let favorites = favorites::load().map_err(|e| Failure::new(EXIT_OTHER, e))?;
         return favorites::find_alias(&favorites, alias.trim())
@@ -523,6 +533,12 @@ fn session_failure(error: Error, target: &Target) -> Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_recipient_is_explained() {
+        let error = command().try_get_matches_from(["mmsend", "訊息"]).expect_err("a recipient is required");
+        assert!(usage_failure(&error).message.starts_with("請指定收件對象"));
+    }
 
     #[test]
     fn code_block_fence_outlasts_backticks_in_the_output() {

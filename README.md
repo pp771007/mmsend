@@ -58,6 +58,7 @@ mmsend status      :: 版本、是否已安裝、是否已登入（會連線確�
 mmsend login       :: 只開啟登入視窗，登入後自動關閉
 mmsend find 王小明 :: 尋找人員、頻道或別名，每行開頭就是傳送時要用的參數
 mmsend --user alice --dry-run "訊息"  :: 試跑：顯示收件對象的姓名與內容，不傳送
+mmsend alias set 值班 --user alice    :: 設定別名（mmsend alias 列出，mmsend alias -h 看全部用法）
 ```
 
 `mmsend login` 的視窗固定在最上層，登入後自動關閉並顯示登入的帳號；未登入就關閉視窗時，結束代碼為 3。

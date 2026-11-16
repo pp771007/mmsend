@@ -6,14 +6,14 @@
 use std::collections::HashSet;
 
 use clap::error::ErrorKind;
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, Subcommand};
 
-use crate::api::{self, USER_SEARCH_LIMIT};
+use crate::api::{self, ApiError, USER_SEARCH_LIMIT};
 use crate::cli::{
-    EXIT_NOT_LOGGED_IN, EXIT_OTHER, EXIT_TARGET_NOT_FOUND, Failure, login_failure, usage_failure,
-    with_retries,
+    EXIT_NOT_LOGGED_IN, EXIT_OTHER, EXIT_TARGET_NOT_FOUND, EXIT_USAGE, Failure, TargetArgs,
+    login_failure, parse_target, usage_failure, with_retries,
 };
-use crate::favorites;
+use crate::favorites::{self, Favorite};
 use crate::gui;
 use crate::install::{self, InstallState, Version};
 use crate::session::{Error, Session};
@@ -23,6 +23,7 @@ use crate::target::Target;
 pub const LOGIN: &str = "login";
 pub const STATUS: &str = "status";
 pub const FIND: &str = "find";
+pub const ALIAS: &str = "alias";
 
 /// clap's default headings are English.
 const HELP_TEMPLATE: &str = "\
@@ -112,7 +113,7 @@ pub fn find() -> Result<String, Failure> {
         .iter()
         .filter(|f| !f.alias.is_empty())
         .filter(|f| [&f.alias, &f.title, &f.subtitle].iter().any(|s| s.to_lowercase().contains(&needle)))
-        .map(|f| format!("  {}  {}", Target::alias_args(&f.alias), f.target))
+        .map(alias_line)
         .collect();
     push_section(&mut lines, "別名", aliases);
 
@@ -174,4 +175,140 @@ fn matching_channels(session: &mut Session, needle: &str) -> Result<Vec<String>,
         }
     }
     Ok(lines)
+}
+
+const ALIAS_HELP_TEMPLATE: &str = "\
+{about}
+
+用法：
+  mmsend alias                          列出別名
+  mmsend alias set <別名> --user <帳號>  設定別名（也可用 --channel、--group）
+  mmsend alias remove <別名>            移除別名
+
+換人時重新 set 同一個別名即可，所有使用 --to 的批次檔都不用修改。";
+
+#[derive(Parser)]
+#[command(
+    name = "mmsend alias",
+    about = "列出或設定別名；傳送時以 mmsend --to <別名> 指定對象。",
+    help_template = ALIAS_HELP_TEMPLATE,
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_help_subcommand = true
+)]
+struct AliasArgs {
+    #[command(subcommand)]
+    command: Option<AliasCommand>,
+
+    /// 顯示說明
+    #[arg(short = 'h', long, action = ArgAction::Help)]
+    help: Option<bool>,
+}
+
+#[derive(Subcommand)]
+enum AliasCommand {
+    /// 把別名設定給一個對象；別名原本屬於別人時改為這個對象
+    Set {
+        #[arg(value_name = "別名")]
+        alias: String,
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    /// 移除別名（釘選保留）
+    Remove {
+        #[arg(value_name = "別名")]
+        alias: String,
+    },
+}
+
+pub fn alias() -> Result<String, Failure> {
+    let args = match parse::<AliasArgs>()? {
+        Ok(args) => args,
+        Err(help) => return Ok(help),
+    };
+    let mut favorites = favorites::load().map_err(|e| Failure::new(EXIT_OTHER, e))?;
+    match args.command {
+        None => {
+            let lines: Vec<String> = favorites.iter().filter(|f| !f.alias.is_empty()).map(alias_line).collect();
+            if lines.is_empty() {
+                return Ok("尚未設定別名：以 mmsend alias set <別名> --user <帳號> 設定".to_owned());
+            }
+            Ok(lines.join("\n"))
+        }
+        Some(AliasCommand::Set { alias, target }) => {
+            let alias = alias.trim().to_owned();
+            let target = parse_target(&target)?;
+            // The point of an alias is following a new person without editing scripts,
+            // so taking it over is the normal case, not a conflict.
+            let previous = favorites
+                .iter_mut()
+                .find(|f| f.target != target && !f.alias.is_empty() && f.alias.to_lowercase() == alias.to_lowercase())
+                .map(|f| {
+                    f.alias.clear();
+                    f.target.to_string()
+                });
+            if let Some(problem) = favorites::alias_problem(&alias, &favorites, &target) {
+                return Err(Failure::new(EXIT_USAGE, problem));
+            }
+            if alias.is_empty() {
+                return Err(Failure::new(EXIT_USAGE, "請指定別名"));
+            }
+            let mut session = Session::load().map_err(login_failure)?;
+            let recipient = with_retries(|| target.look_up(&mut session)).map_err(|e| match e {
+                Error::Api(ApiError::NotFound) => {
+                    Failure::new(EXIT_TARGET_NOT_FOUND, format!("找不到 {target}：請以 mmsend find <姓名> 查詢"))
+                }
+                e => login_failure(e),
+            })?;
+            // A pin holds one alias, so scripts still using its old one would stop
+            // working: say so.
+            let mut replaced = None;
+            match favorites.iter_mut().find(|f| f.target == target) {
+                Some(pinned) => {
+                    let old = std::mem::replace(&mut pinned.alias, alias.clone());
+                    if !old.is_empty() && old != alias {
+                        replaced = Some(old);
+                    }
+                }
+                None => favorites.push(Favorite {
+                    alias: alias.clone(),
+                    title: if recipient.name.is_empty() { target.to_string() } else { recipient.name.clone() },
+                    subtitle: if recipient.name.is_empty() { String::new() } else { target.to_string() },
+                    user_id: recipient.user_id().map(str::to_owned),
+                    private: recipient.private,
+                    target,
+                }),
+            }
+            favorites::save(&favorites).map_err(|e| Failure::new(EXIT_OTHER, e))?;
+            let moved = previous.map(|from| format!("（原本是 {from}）")).unwrap_or_default();
+            let mut lines = vec![format!("別名「{alias}」→ {}{moved}", recipient.label)];
+            if let Some(old) = replaced {
+                lines.push(format!("一個對象只能有一個別名，原本的別名「{old}」已失效"));
+            }
+            lines.push(format!("傳送時使用：mmsend {} \"訊息\"", Target::alias_args(&alias)));
+            Ok(lines.join("\n"))
+        }
+        Some(AliasCommand::Remove { alias }) => {
+            let Some(favorite) = favorites
+                .iter_mut()
+                .find(|f| !f.alias.is_empty() && f.alias.to_lowercase() == alias.trim().to_lowercase())
+            else {
+                return Err(Failure::new(EXIT_TARGET_NOT_FOUND, format!("找不到別名「{alias}」")));
+            };
+            favorite.alias.clear();
+            let target = favorite.target.to_string();
+            favorites::save(&favorites).map_err(|e| Failure::new(EXIT_OTHER, e))?;
+            Ok(format!("已移除別名「{alias}」（{target} 仍保留釘選）"))
+        }
+    }
+}
+
+/// `--to 值班  @alice 王小明`: the arguments, then who they reach.
+fn alias_line(favorite: &Favorite) -> String {
+    let who = if favorite.title.starts_with('@') || favorite.title == favorite.target.to_string() {
+        favorite.target.to_string()
+    } else {
+        format!("{} {}", favorite.target, favorite.title)
+    };
+    format!("  {}  {who}", Target::alias_args(&favorite.alias))
 }

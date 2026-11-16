@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::ApiError;
+use crate::api::{self, ApiError};
 use crate::session::{Error, Session};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -97,6 +97,8 @@ impl Target {
                 let other = session.call(|c| c.user_by_username(username))?;
                 Ok(Recipient {
                     label: other.label(),
+                    name: other.full_name(),
+                    private: false,
                     place: Place::Direct(other.id),
                 })
             }
@@ -104,6 +106,8 @@ impl Target {
                 let found = session.call(|c| c.channel_by_name(team, channel))?;
                 Ok(Recipient {
                     label: format!("{self} {}", found.display_name),
+                    name: found.display_name,
+                    private: found.kind == api::CHANNEL_PRIVATE,
                     place: Place::Channel(found.id),
                 })
             }
@@ -114,11 +118,15 @@ impl Target {
                 }
                 Ok(Recipient {
                     label: format!("群組 {}", users.iter().map(|u| u.label()).collect::<Vec<_>>().join("、")),
+                    name: users.iter().map(|u| u.full_name()).collect::<Vec<_>>().join("、"),
+                    private: false,
                     place: Place::Group(users.into_iter().map(|u| u.id).collect()),
                 })
             }
             Target::ChannelId(id) => Ok(Recipient {
                 label: self.to_string(),
+                name: String::new(),
+                private: false,
                 place: Place::Channel(id.clone()),
             }),
         }
@@ -129,6 +137,9 @@ impl Target {
 pub struct Recipient {
     /// `@alice 王小明`, `dev/town-square 公眾大廳`: what a person checks before sending.
     pub label: String,
+    /// The person's or channel's name, empty when it has none.
+    pub name: String,
+    pub private: bool,
     place: Place,
 }
 
@@ -152,6 +163,14 @@ impl Recipient {
                 ids.push(me);
                 Ok(session.call(|c| c.group_channel(&ids))?.id)
             }
+        }
+    }
+
+    /// The person's user id, for a direct message (the window shows their picture).
+    pub fn user_id(&self) -> Option<&str> {
+        match &self.place {
+            Place::Direct(id) => Some(id),
+            Place::Channel(_) | Place::Group(_) => None,
         }
     }
 
