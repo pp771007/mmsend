@@ -42,6 +42,10 @@ const BUTTON_FONT_SIZE: f32 = 14.5;
 const SEGMENT_HEIGHT: f32 = 28.0;
 const SEGMENT_PADDING: f32 = 14.0;
 const ROW_HEIGHT: f32 = 52.0;
+/// Above and below a row's text when it is taller than ROW_HEIGHT allows.
+const ROW_TEXT_PADDING: f32 = 9.0;
+/// A group is told apart by its members, so their names get a second line.
+const GROUP_TITLE_ROWS: usize = 2;
 const AVATAR_RADIUS: f32 = 17.0;
 const HEADER_AVATAR_RADIUS: f32 = 18.0;
 const SMALL_AVATAR_SIZE: f32 = 22.0;
@@ -1550,8 +1554,18 @@ fn segmented<T: Copy + PartialEq>(ui: &mut egui::Ui, value: &mut T, choices: &[(
 
 /// A single line that ends in "…" instead of overflowing.
 fn elided(painter: &Painter, text: &str, font: FontId, color: Color32, max_width: f32) -> Arc<Galley> {
+    wrapped(painter, text, font, color, max_width, 1)
+}
+
+/// Up to `max_rows` lines, with an ellipsis if the text still does not fit.
+fn wrapped(painter: &Painter, text: &str, font: FontId, color: Color32, max_width: f32, max_rows: usize) -> Arc<Galley> {
     let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = TextWrapping::truncate_at_width(max_width.max(0.0));
+    job.wrap = TextWrapping {
+        max_width: max_width.max(0.0),
+        max_rows,
+        break_anywhere: max_rows == 1,
+        overflow_character: Some('…'),
+    };
     painter.layout_job(job)
 }
 
@@ -1936,7 +1950,10 @@ fn directory_panel(ui: &mut egui::Ui, view: &mut MainView, p: &Palette, action: 
             ui.add_space(10.0);
         }
         if show_people {
-            section_header(ui, "人員", people.len(), p);
+            // Without a search the list holds only people already messaged; the title
+            // says so, since everyone else is a search away.
+            let title = if searching { "人員" } else { "最近私訊" };
+            section_header(ui, title, people.len(), p);
             if people.is_empty() {
                 empty_hint(ui, "沒有符合的人員", p);
             }
@@ -1946,7 +1963,7 @@ fn directory_panel(ui: &mut egui::Ui, view: &mut MainView, p: &Palette, action: 
                     view.select(entry.clone());
                 }
             }
-            if !searching && view.filter == Filter::People {
+            if !searching {
                 empty_hint(ui, "其他人員請使用上方的搜尋", p);
             }
             ui.add_space(10.0);
@@ -1980,7 +1997,23 @@ fn empty_hint(ui: &mut egui::Ui, text: &str, p: &Palette) {
 }
 
 fn entry_row(ui: &mut egui::Ui, entry: &Entry, selected: bool, avatars: &mut Avatars, p: &Palette) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    // Text is laid out first: a group's member names may take two lines, and the row grows to fit.
+    let width = ui.available_width();
+    let text_offset = 12.0 + AVATAR_RADIUS * 2.0 + 12.0;
+    let max_width = width - text_offset - 12.0;
+    let layout = ui.painter().clone();
+    let tag = (!entry.alias.is_empty())
+        .then(|| layout.layout_no_wrap(entry.alias.clone(), FontId::proportional(ALIAS_TAG_FONT_SIZE), p.accent));
+    let tag_room = tag.as_ref().map_or(0.0, |g| g.size().x + ALIAS_TAG_PADDING.x * 2.0 + ALIAS_TAG_GAP);
+    let title_rows = if entry.kind == EntryKind::Group { GROUP_TITLE_ROWS } else { 1 };
+    let title = wrapped(&layout, &entry.title, FontId::proportional(15.0), p.text, max_width - tag_room, title_rows);
+    let subtitle = (!entry.subtitle.is_empty())
+        .then(|| elided(&layout, &entry.subtitle, FontId::proportional(12.5), p.text_weak, max_width));
+    let gap = 2.0;
+    let block_height = title.size().y + subtitle.as_ref().map_or(0.0, |s| gap + s.size().y);
+    let height = (block_height + 2.0 * ROW_TEXT_PADDING).max(ROW_HEIGHT);
+
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
     // Custom-painted rows are invisible to screen readers unless described.
     response.widget_info(|| {
         let label = match entry.alias.as_str() {
@@ -1989,12 +2022,13 @@ fn entry_row(ui: &mut egui::Ui, entry: &Entry, selected: bool, avatars: &mut Ava
         };
         egui::WidgetInfo::selected(egui::Role::Button, true, selected, label)
     });
+    let cut_short = title.elided;
     if ui.is_rect_visible(rect) {
         let hover = ui.ctx().animate_bool_with_time(response.id, response.hovered(), HOVER_ANIMATION);
         let fill = if selected { p.accent_soft } else { Color32::TRANSPARENT.lerp_to_gamma(p.hover, hover) };
         ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), fill);
         if selected {
-            let bar = Rect::from_min_size(rect.min + vec2(0.0, 13.0), vec2(3.0, ROW_HEIGHT - 26.0));
+            let bar = Rect::from_min_size(rect.min + vec2(0.0, 13.0), vec2(3.0, rect.height() - 26.0));
             ui.painter().rect_filled(bar, CornerRadius::same(2), p.accent);
         }
 
@@ -2005,22 +2039,15 @@ fn entry_row(ui: &mut egui::Ui, entry: &Entry, selected: bool, avatars: &mut Ava
         paint_avatar(ui, avatars, avatar_rect, entry, p);
 
         let painter = ui.painter_at(rect);
-        let text_x = avatar_rect.right() + 12.0;
-        let max_width = rect.right() - 12.0 - text_x;
-        let tag = (!entry.alias.is_empty())
-            .then(|| painter.layout_no_wrap(entry.alias.clone(), FontId::proportional(ALIAS_TAG_FONT_SIZE), p.accent));
-        let tag_room = tag.as_ref().map_or(0.0, |g| g.size().x + ALIAS_TAG_PADDING.x * 2.0 + ALIAS_TAG_GAP);
-        let title = elided(&painter, &entry.title, FontId::proportional(15.0), p.text, max_width - tag_room);
-        let subtitle = (!entry.subtitle.is_empty())
-            .then(|| elided(&painter, &entry.subtitle, FontId::proportional(12.5), p.text_weak, max_width));
-        let gap = 2.0;
-        let block_height = title.size().y + subtitle.as_ref().map_or(0.0, |s| gap + s.size().y);
+        let text_x = rect.left() + text_offset;
         let top = rect.center().y - block_height / 2.0;
         let title_size = title.size();
+        // Beside the first line, which a wrapped title fills first.
+        let first_line_height = title.rows.first().map_or(title_size.y, |row| row.height());
         painter.galley(Pos2::new(text_x, top), title, p.text);
         if let Some(tag) = tag {
             let tag_rect = Rect::from_min_size(
-                Pos2::new(text_x + title_size.x + ALIAS_TAG_GAP, top + (title_size.y - tag.size().y) / 2.0)
+                Pos2::new(text_x + title_size.x + ALIAS_TAG_GAP, top + (first_line_height - tag.size().y) / 2.0)
                     - ALIAS_TAG_PADDING,
                 tag.size() + ALIAS_TAG_PADDING * 2.0,
             );
@@ -2031,6 +2058,7 @@ fn entry_row(ui: &mut egui::Ui, entry: &Entry, selected: bool, avatars: &mut Ava
             painter.galley(Pos2::new(text_x, top + title_size.y + gap), subtitle, p.text_weak);
         }
     }
+    let response = if cut_short { response.on_hover_text(&entry.title) } else { response };
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
@@ -2085,7 +2113,8 @@ fn composer(
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                         let (rect, _) = ui.allocate_exact_size(Vec2::splat(SMALL_AVATAR_SIZE), Sense::hover());
                         paint_avatar(ui, &mut view.avatars, rect, entry, p);
-                        ui.add(Label::new(RichText::new(&entry.title).strong().color(p.text)).truncate());
+                        // Wrapped, not cut: for a group these are the members being messaged.
+                        ui.add(Label::new(RichText::new(&entry.title).strong().color(p.text)).wrap());
                     });
                 },
             );
