@@ -1,0 +1,192 @@
+//! Who a message goes to, and the command line that addresses them.
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+use crate::api::ApiError;
+use crate::session::{Error, Session};
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Target {
+    /// Direct message, by Mattermost username.
+    User(String),
+    /// Public or private channel, by team and channel URL names
+    /// (the slugs in `https://host/<team>/channels/<channel>`).
+    Channel { team: String, channel: String },
+    /// Group message, by the other members' usernames (sorted). Mattermost finds the
+    /// group from its member list, so this survives without the opaque channel id.
+    Group(Vec<String>),
+    /// Any channel by its raw id; kept for scripts written against older versions.
+    ChannelId(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TemplateKind {
+    Inline,
+    File,
+    Pipe,
+    Attach,
+}
+
+impl TemplateKind {
+    /// The message is written into the command, inside quotes.
+    pub fn quotes_message(self) -> bool {
+        matches!(self, TemplateKind::Inline | TemplateKind::Attach)
+    }
+}
+
+const MESSAGE_PLACEHOLDER: &str = "訊息內容";
+const FILE_PLACEHOLDER: &str = "訊息.txt";
+const PIPE_PLACEHOLDER: &str = "您的指令";
+const ATTACH_PLACEHOLDER: &str = "檔案路徑";
+
+impl Target {
+    /// Parses the `--channel team/channel` form.
+    pub fn parse_channel(spec: &str) -> Option<Target> {
+        let (team, channel) = spec.split_once('/')?;
+        let (team, channel) = (team.trim(), channel.trim());
+        if team.is_empty() || channel.is_empty() || channel.contains('/') {
+            return None;
+        }
+        Some(Target::Channel {
+            team: team.to_owned(),
+            channel: channel.to_owned(),
+        })
+    }
+
+    /// Parses the `--group alice,bob` form.
+    pub fn parse_group(spec: &str) -> Option<Target> {
+        let mut members: Vec<String> = spec
+            .split(',')
+            .map(|name| name.trim().trim_start_matches('@').to_owned())
+            .filter(|name| !name.is_empty())
+            .collect();
+        members.sort();
+        members.dedup();
+        (!members.is_empty()).then_some(Target::Group(members))
+    }
+
+    /// Mattermost usernames and URL names cannot contain spaces or shell
+    /// metacharacters, so the arguments never need quoting.
+    pub fn cli_args(&self) -> String {
+        match self {
+            Target::User(username) => format!("--user {username}"),
+            Target::Channel { team, channel } => format!("--channel {team}/{channel}"),
+            Target::Group(members) => format!("--group {}", members.join(",")),
+            Target::ChannelId(id) => format!("--channel-id {id}"),
+        }
+    }
+
+    /// `--to 值班` instead of the target's own arguments, for a pinned target with an alias.
+    pub fn alias_args(alias: &str) -> String {
+        format!("--to {alias}")
+    }
+
+    /// cmd has no way to escape `"` inside a quoted argument (a stray quote turns
+    /// the rest of the line, `&` and `|` included, back into shell syntax), and a
+    /// command line cannot hold a newline. Such messages need the file form.
+    pub fn fits_inline(message: &str) -> bool {
+        !message.contains(['"', '\n', '\r'])
+    }
+
+    pub fn resolve_channel_id(&self, session: &mut Session) -> Result<String, Error> {
+        match self {
+            Target::User(username) => {
+                let me = session.config.user_id.clone();
+                let other = session.call(|c| c.user_by_username(username))?;
+                Ok(session.call(|c| c.direct_channel(&me, &other.id))?.id)
+            }
+            Target::Channel { team, channel } => {
+                Ok(session.call(|c| c.channel_by_name(team, channel))?.id)
+            }
+            Target::Group(members) => {
+                let users = session.call(|c| c.users_by_usernames(members))?;
+                if users.len() != members.len() {
+                    return Err(Error::Api(ApiError::NotFound));
+                }
+                let mut ids: Vec<String> = users.into_iter().map(|u| u.id).collect();
+                ids.push(session.config.user_id.clone());
+                Ok(session.call(|c| c.group_channel(&ids))?.id)
+            }
+            Target::ChannelId(id) => Ok(id.clone()),
+        }
+    }
+}
+
+/// `program` is how the exe is invoked (`mmsend`, or a quoted full path), `args`
+/// names the recipient; `message` fills the forms that quote it, empty means show a
+/// placeholder to replace.
+pub fn command_line(program: &str, args: &str, kind: TemplateKind, message: &str) -> String {
+    let exe = program;
+    let message = if message.is_empty() { MESSAGE_PLACEHOLDER } else { message };
+    match kind {
+        TemplateKind::Inline => format!("{exe} {args} \"{message}\""),
+        TemplateKind::File => format!("{exe} {args} --file \"{FILE_PLACEHOLDER}\""),
+        // Command output is usually columns (dir, ipconfig) that only line up
+        // in a code block.
+        TemplateKind::Pipe => format!("{PIPE_PLACEHOLDER} | {exe} {args} --code"),
+        TemplateKind::Attach => format!("{exe} {args} --attach \"{ATTACH_PLACEHOLDER}\" \"{message}\""),
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Target::User(username) => write!(f, "@{username}"),
+            Target::Channel { team, channel } => write!(f, "{team}/{channel}"),
+            Target::Group(members) => write!(f, "群組 {}", members.join(",")),
+            Target::ChannelId(id) => write!(f, "頻道 {id}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copied_command_fills_in_the_message_or_a_placeholder() {
+        let target = Target::User("alice".into());
+        assert_eq!(
+            command_line("mmsend", &target.cli_args(), TemplateKind::Inline, ""),
+            r#"mmsend --user alice "訊息內容""#
+        );
+        assert_eq!(
+            command_line("mmsend", &target.cli_args(), TemplateKind::Inline, "報表跑完了"),
+            r#"mmsend --user alice "報表跑完了""#
+        );
+    }
+
+    #[test]
+    fn group_spec_is_normalized_so_member_order_does_not_matter() {
+        let target = Target::parse_group(" @bob, alice ,bob").unwrap();
+        assert_eq!(target, Target::Group(vec!["alice".into(), "bob".into()]));
+        assert_eq!(
+            command_line("mmsend", &target.cli_args(), TemplateKind::File, ""),
+            r#"mmsend --group alice,bob --file "訊息.txt""#
+        );
+        assert_eq!(Target::parse_group(" , "), None);
+    }
+
+    #[test]
+    fn messages_cmd_cannot_quote_are_flagged() {
+        assert!(Target::fits_inline("100% done & ok"));
+        assert!(!Target::fits_inline(r#"he said "hi""#));
+        assert!(!Target::fits_inline("line 1\nline 2"));
+    }
+
+    #[test]
+    fn channel_command_round_trips_through_the_parser() {
+        let target = Target::parse_channel("dev-team/town-square").unwrap();
+        let command = command_line(r#""C:\t\mmsend.exe""#, &target.cli_args(), TemplateKind::Pipe, "ignored");
+        assert_eq!(command, r#"您的指令 | "C:\t\mmsend.exe" --channel dev-team/town-square --code"#);
+    }
+
+    #[test]
+    fn malformed_channel_spec_is_rejected() {
+        assert_eq!(Target::parse_channel("town-square"), None);
+        assert_eq!(Target::parse_channel("team/"), None);
+        assert_eq!(Target::parse_channel("a/b/c"), None);
+    }
+}
