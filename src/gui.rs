@@ -28,8 +28,8 @@ use crate::store::{self, SendRecord};
 use crate::target::{self, Target, TemplateKind};
 use crate::theme::{self, CARD_RADIUS, Palette, RADIUS};
 
-const WINDOW_SIZE: [f32; 2] = [520.0, 760.0];
-const WINDOW_MIN_SIZE: [f32; 2] = [420.0, 600.0];
+const WINDOW_SIZE: [f32; 2] = [880.0, 660.0];
+const WINDOW_MIN_SIZE: [f32; 2] = [720.0, 520.0];
 const WINDOW_ICON_SIZE: u32 = 64;
 const LOGO_SIZE: f32 = 56.0;
 const LOGIN_CARD_WIDTH: f32 = 380.0;
@@ -67,10 +67,10 @@ const ALIAS_TAG_GAP: f32 = 8.0;
 /// Fits the icon and 已釘選.
 const PIN_BUTTON_WIDTH: f32 = 92.0;
 const RECIPIENT_CARD_PADDING: i8 = 10;
-/// What the list keeps below the header however tall the composer grows: search,
-/// filter and a row. Small, because the list scrolls anyway while the composer's
-/// copy button at the bottom should stay in view at the default window size.
-const MIN_DIRECTORY_HEIGHT: f32 = 190.0;
+const DIRECTORY_WIDTH: f32 = 340.0;
+/// Icon and line of the "pick someone" state, to centre it vertically.
+const EMPTY_STATE_HEIGHT: f32 = 56.0;
+const SEND_NOW_WIDTH: f32 = 120.0;
 /// Between the recipient card and the message: what is kept versus what is sent now.
 const RECIPIENT_MESSAGE_GAP: f32 = 12.0;
 /// Shorter than the other fields: the recipient card should not squeeze the list.
@@ -88,10 +88,6 @@ const INSTALL_LOCATION: &str = "安裝至 %LOCALAPPDATA%\\Programs\\mmsend";
 const BANNER_BUTTON_WIDTH: f32 = 124.0;
 const BANNER_BUTTON_HEIGHT: f32 = 30.0;
 const CODE_CHIP_FONT_SIZE: f32 = 12.5;
-const SEND_BUTTON_SIZE: f32 = 30.0;
-/// Distance from the message field's right edge to the send button's centre.
-const SEND_BUTTON_INSET: f32 = 21.0;
-const MESSAGE_MARGIN: Margin = Margin { left: 10, right: 42, top: 10, bottom: 10 };
 const GROUP_NAME_SEPARATOR: &str = "、";
 /// After your own name in the list; Mattermost's own zh-TW UI marks yourself the same way.
 const SELF_MARK: &str = " (您)";
@@ -514,6 +510,7 @@ enum Action {
     Send { target: Target, message: String },
     Install,
     ShowHistory,
+    ConfirmLogout,
     ConfirmUninstall,
     Uninstall,
     ShowError(String),
@@ -587,8 +584,6 @@ struct MainView {
     searched_query: String,
     found_people: Vec<Entry>,
     focus_search: bool,
-    /// Last frame's composer height; toasts float just above it.
-    composer_height: f32,
     selected: Option<Entry>,
     focus_message: bool,
     message: String,
@@ -718,6 +713,8 @@ struct App {
     /// The send log, while its dialog is open.
     history: Option<Result<Vec<SendRecord>, String>>,
     uninstall: UninstallStep,
+    confirming_logout: bool,
+    size_checked: bool,
     /// `mmsend login`: set on success, then the window closes instead of opening the main view.
     login_only: Option<Arc<AtomicBool>>,
     was_focused: bool,
@@ -764,6 +761,8 @@ impl App {
             window_geometry: storage.and_then(|s| s.get_string(EFRAME_WINDOW_KEY)),
             history: None,
             uninstall: UninstallStep::Idle,
+            confirming_logout: false,
+            size_checked: false,
             login_only,
             was_focused: false,
         };
@@ -820,7 +819,6 @@ impl App {
             searched_query: String::new(),
             found_people: Vec::new(),
             focus_search: true,
-            composer_height: 0.0,
             selected: None,
             focus_message: false,
             message: String::new(),
@@ -833,6 +831,23 @@ impl App {
             alias_draft: String::new(),
             alias_error: None,
         }));
+    }
+
+    /// eframe restores the last window size without applying the minimum, so a size
+    /// saved by the older single-column window would cut off the composer column.
+    fn widen_saved_window(&mut self, ctx: &egui::Context) {
+        if self.size_checked {
+            return;
+        }
+        let Some(inner) = ctx.input(|i| i.viewport().inner_rect) else {
+            return;
+        };
+        self.size_checked = true;
+        let [min_width, min_height] = WINDOW_MIN_SIZE;
+        if inner.width() < min_width || inner.height() < min_height {
+            let width = if inner.width() < min_width { WINDOW_SIZE[0] } else { inner.width() };
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(width, inner.height().max(min_height))));
+        }
     }
 
     /// Coming back to the window after `mmsend alias set` ran in a terminal, the pins
@@ -1041,6 +1056,7 @@ impl App {
             }
             Action::ShowHistory => self.history = Some(store::load_send_records()),
             Action::ShowError(text) => self.toast = Some(Toast::new(ToastKind::Error, text)),
+            Action::ConfirmLogout => self.confirming_logout = true,
             Action::ConfirmUninstall => self.uninstall = UninstallStep::Confirming,
             Action::Uninstall => {
                 self.uninstall = UninstallStep::Running;
@@ -1058,6 +1074,18 @@ impl App {
                         .and_then(|()| store::remove_app_dir());
                     Msg::Uninstalled(result)
                 });
+            }
+        }
+    }
+
+    fn show_logout(&mut self, ctx: &egui::Context, p: &Palette) {
+        if !self.confirming_logout {
+            return;
+        }
+        if let Some(confirmed) = logout_dialog(ctx, p) {
+            self.confirming_logout = false;
+            if confirmed {
+                self.apply(Action::Logout);
             }
         }
     }
@@ -1083,6 +1111,31 @@ impl App {
 }
 
 /// `Some(true)`: go ahead; `Some(false)`: cancelled.
+/// `Some(true)`: log out; `Some(false)`: cancelled.
+fn logout_dialog(ctx: &egui::Context, p: &Palette) -> Option<bool> {
+    let mut choice = None;
+    let modal = egui::Modal::new(egui::Id::unique("logout")).frame(dialog_frame(p)).show(ctx, |ui| {
+        ui.set_width((ctx.content_rect().width() - DIALOG_SIDE_GAP).min(DIALOG_WIDTH));
+        ui.horizontal(|ui| {
+            paint_icon(ui, Icon::Logout, 20.0, p.danger, p.surface);
+            ui.label(RichText::new("登出").size(17.0).strong().color(p.text));
+        });
+        ui.add_space(10.0);
+        ui.label(RichText::new("登出後，批次檔與排程都無法傳送，直到重新登入。").color(p.danger));
+        ui.add_space(16.0);
+        let half = vec2((ui.available_width() - ui.spacing().item_spacing.x) / 2.0, CONTROL_HEIGHT);
+        ui.horizontal(|ui| {
+            if button(ui, ButtonKind::Secondary, None, "取消", half, true, None).clicked() {
+                choice = Some(false);
+            }
+            if button(ui, ButtonKind::Danger, Some(Icon::Logout), "登出", half, true, None).clicked() {
+                choice = Some(true);
+            }
+        });
+    });
+    choice.or(modal.should_close().then_some(false))
+}
+
 fn uninstall_dialog(ctx: &egui::Context, step: UninstallStep, p: &Palette) -> Option<bool> {
     let mut choice = None;
     let modal = egui::Modal::new(egui::Id::unique("uninstall")).frame(dialog_frame(p)).show(ctx, |ui| {
@@ -1252,6 +1305,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.widen_saved_window(ui.ctx());
         self.drain_messages();
         self.reload_favorites_on_focus(ui.ctx());
         let palette = theme::palette(ui.ctx());
@@ -1262,6 +1316,7 @@ impl eframe::App for App {
         self.apply(action);
         self.fetch_wanted_avatars();
         self.show_history(ui.ctx(), palette);
+        self.show_logout(ui.ctx(), palette);
         self.show_uninstall(ui.ctx(), palette);
         self.show_toast(ui.ctx(), palette);
     }
@@ -1285,15 +1340,15 @@ impl App {
             ToastKind::Error => (Icon::Warning, p.danger),
         };
         let background = p.toast_background;
-        // Snackbar position: just above the composer, so it never covers its buttons.
-        let above = match &self.screen {
-            Screen::Main(view) => view.composer_height,
+        // Centred under the composer column, below its buttons, clear of the list.
+        let shift = match &self.screen {
+            Screen::Main(_) => DIRECTORY_WIDTH / 2.0,
             Screen::Login(_) => 0.0,
-        } + TOAST_GAP;
+        };
         egui::Area::new(egui::Id::unique("toast"))
             .order(egui::Order::Foreground)
             .interactable(false)
-            .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -above + (1.0 - opacity) * TOAST_SLIDE))
+            .anchor(Align2::CENTER_BOTTOM, vec2(shift, -TOAST_GAP + (1.0 - opacity) * TOAST_SLIDE))
             .show(ctx, |ui| {
                 ui.set_opacity(opacity);
                 Frame::default()
@@ -1728,36 +1783,28 @@ fn main_ui(ui: &mut egui::Ui, view: &mut MainView, installation: &Installation, 
             install_banner(ui, installation, p, &mut action);
         });
 
-    // The composer grows with its content; past this it scrolls, so the list above
-    // never shrinks out of sight.
-    let composer_max_height = (ui.available_height() - MIN_DIRECTORY_HEIGHT - 2.0 * f32::from(PAGE_MARGIN)).max(0.0);
-    let composer = egui::Panel::bottom("composer")
-        .frame(Frame::default().fill(p.surface).inner_margin(Margin::same(PAGE_MARGIN)))
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("composer")
-                .max_height(composer_max_height)
-                // Otherwise content taller than the panel's last height is squeezed
-                // into egui's default 64 px instead of growing the panel.
-                .min_scrolled_height(composer_max_height)
-                .show(ui, |ui| match view.selected.clone() {
-                    Some(entry) => composer(ui, view, &entry, installation, p, &mut action),
-                    None => {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(4.0);
-                            paint_icon(ui, Icon::Chat, 26.0, p.text_weak, p.surface);
-                            ui.label(RichText::new("請選擇人員或頻道").color(p.text_weak));
-                            ui.add_space(4.0);
-                        });
-                    }
-                });
-        });
-
-    view.composer_height = composer.response.rect.height();
-
-    egui::CentralPanel::default()
+    // Side by side, so both the list and the composer get the full height: stacked,
+    // an open composer left the list a row or two.
+    egui::Panel::left("directory")
+        .exact_size(DIRECTORY_WIDTH)
+        .resizable(false)
         .frame(Frame::default().fill(p.background).inner_margin(Margin::symmetric(PAGE_MARGIN, 12)))
         .show(ui, |ui| directory_panel(ui, view, p, &mut action));
+
+    egui::CentralPanel::default()
+        .frame(Frame::default().fill(p.surface).inner_margin(Margin::same(PAGE_MARGIN)))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("composer").show(ui, |ui| match view.selected.clone() {
+                Some(entry) => composer(ui, view, &entry, installation, p, &mut action),
+                None => {
+                    ui.add_space((ui.available_height() - EMPTY_STATE_HEIGHT).max(0.0) / 2.0);
+                    ui.vertical_centered(|ui| {
+                        paint_icon(ui, Icon::Chat, 26.0, p.text_weak, p.surface);
+                        ui.label(RichText::new("請選擇人員或頻道").color(p.text_weak));
+                    });
+                }
+            });
+        });
 
     if view.selected.is_some() && ui.input(|i| i.key_pressed(Key::Escape)) {
         view.selected = None;
@@ -1810,14 +1857,14 @@ fn header(ui: &mut egui::Ui, view: &mut MainView, installed: bool, p: &Palette, 
                     if menu_item(ui, Icon::History, "傳送紀錄", p.text).clicked() {
                         *action = Action::ShowHistory;
                     }
+                    // Rare, and it stops every script from sending: in the menu, behind a confirmation.
+                    if menu_item(ui, Icon::Logout, "登出…", p.text).clicked() {
+                        *action = Action::ConfirmLogout;
+                    }
                     if installed && menu_item(ui, Icon::Trash, "解除安裝…", p.danger).clicked() {
                         *action = Action::ConfirmUninstall;
                     }
                 });
-            let logout = button(ui, ButtonKind::Ghost, Some(Icon::Logout), "登出", vec2(84.0, 34.0), true, None);
-            if logout.clicked() {
-                *action = Action::Logout;
-            }
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 ui.add(Label::new(RichText::new(&name).strong().color(p.text)).truncate());
@@ -2061,82 +2108,45 @@ fn composer(
     }
     ui.add_space(RECIPIENT_MESSAGE_GAP);
 
-    let message_label = field_label(ui, "訊息", p);
-    let message = ui
-        .add(
-            TextEdit::singleline(&mut view.message)
-                .hint_text("例如：報表跑完了")
-                .margin(MESSAGE_MARGIN)
-                .desired_width(f32::INFINITY),
-        )
-        .labelled_by(message_label);
-    if view.focus_message {
-        view.focus_message = false;
-        message.request_focus();
-    }
-    if message.changed() {
+    // How the message gets in decides whether there is a message to type, so it comes first.
+    field_label(ui, "傳送方式", p);
+    if segmented(ui, &mut view.template, &TEMPLATE_CHOICES, p) {
         view.copied_at = None;
-        view.sent_at = None;
-        view.send_error = None;
     }
-    let can_send = !view.message.trim().is_empty() && !view.sending;
-    let send_by_enter = message.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+    if view.template.quotes_message() {
+        ui.add_space(8.0);
+        let message_label = field_label(ui, "訊息", p);
+        let message = ui
+            .add(
+                TextEdit::singleline(&mut view.message)
+                    .hint_text("例如：報表跑完了")
+                    .margin(INPUT_MARGIN)
+                    .desired_width(f32::INFINITY),
+            )
+            .labelled_by(message_label);
+        if view.focus_message {
+            message.request_focus();
+        }
+        if message.changed() {
+            view.copied_at = None;
+            view.sent_at = None;
+            view.send_error = None;
+        }
+    }
+    view.focus_message = false;
+
     let now = Instant::now();
     let recently = |at: Option<Instant>| at.is_some_and(|t| now.duration_since(t) < FEEDBACK_DURATION);
     let (copied, sent) = (recently(view.copied_at), recently(view.sent_at));
-    let send_clicked = send_button(ui, &message, view.sending, sent, can_send, p);
-    if (send_clicked || send_by_enter) && can_send {
-        *action = Action::Send {
-            target: entry.target.clone(),
-            message: view.message.trim().to_owned(),
-        };
-    }
+    ui.add_space(8.0);
+    command_section(ui, view, entry, copied, sent, installation.state.commands_work(), p, action);
     if let Some(error) = view.send_error.clone() {
-        ui.add_space(2.0);
+        ui.add_space(4.0);
         error_box(ui, &error, None, p);
     }
-
-    ui.add_space(6.0);
-    command_section(ui, view, entry, copied, installation.state.commands_work(), p);
     if copied || sent {
         ui.ctx().request_repaint_after(FEEDBACK_DURATION);
     }
-}
-
-/// The round send button inside the right end of the message field.
-fn send_button(ui: &mut egui::Ui, field: &Response, sending: bool, sent: bool, enabled: bool, p: &Palette) -> bool {
-    let rect = Rect::from_center_size(
-        Pos2::new(field.rect.right() - SEND_BUTTON_INSET, field.rect.center().y),
-        Vec2::splat(SEND_BUTTON_SIZE),
-    );
-    let label = "立即傳送（Enter）";
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
-    let response = ui
-        .interact(rect, ui.scope_id().with("send-now"), sense)
-        .on_hover_text(label);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(response.id, enabled && response.hovered(), HOVER_ANIMATION);
-    let radius = rect.width() / 2.0;
-    let glyph = rect.shrink(rect.width() * 0.27);
-    if sending {
-        egui::Spinner::new().color(p.accent).paint_at(ui, rect.shrink(5.0));
-    } else if sent {
-        ui.painter().circle_filled(rect.center(), radius, p.success);
-        icons::paint(ui.painter(), Icon::Check, glyph, Color32::WHITE, p.success);
-    } else if enabled {
-        let fill = p.accent.lerp_to_gamma(p.accent_hover, hover);
-        ui.painter().circle_filled(rect.center(), radius, fill);
-        icons::paint(ui.painter(), Icon::Send, glyph, p.on_accent, fill);
-    } else {
-        icons::paint(ui.painter(), Icon::Send, glyph, p.text_weak.gamma_multiply(0.5), p.surface);
-    }
-    let clicked = enabled && response.clicked();
-    if enabled {
-        response.on_hover_cursor(CursorIcon::PointingHand);
-    }
-    clicked
 }
 
 /// The selected recipient's alias. A valid alias is saved as it is typed (pinning
@@ -2170,12 +2180,20 @@ fn alias_field(ui: &mut egui::Ui, view: &mut MainView, entry: &Entry, p: &Palett
     });
 }
 
+/// The command, and the two things to do with it: copy it, or send the message now.
 /// `installed`: the bare `mmsend` in the command only works once installed, so
 /// copying waits for the banner's install button.
-fn command_section(ui: &mut egui::Ui, view: &mut MainView, entry: &Entry, copied: bool, installed: bool, p: &Palette) {
-    if segmented(ui, &mut view.template, &TEMPLATE_CHOICES, p) {
-        view.copied_at = None;
-    }
+#[allow(clippy::too_many_arguments)]
+fn command_section(
+    ui: &mut egui::Ui,
+    view: &mut MainView,
+    entry: &Entry,
+    copied: bool,
+    sent: bool,
+    installed: bool,
+    p: &Palette,
+    action: &mut Action,
+) {
     let args = view
         .alias_of(&entry.target)
         .map(Target::alias_args)
@@ -2195,16 +2213,39 @@ fn command_section(ui: &mut egui::Ui, view: &mut MainView, entry: &Entry, copied
         notice(ui, Icon::Warning, "訊息含有雙引號或換行，請改用「文字檔」", p.danger, p.danger_soft);
     }
     ui.add_space(4.0);
-    let (icon, label) = match (installed, copied) {
-        (false, _) => (Icon::Copy, "安裝後即可複製"),
-        (true, true) => (Icon::Check, "已複製"),
-        (true, false) => (Icon::Copy, "複製指令"),
-    };
-    let size = vec2(ui.available_width(), CONTROL_HEIGHT);
-    if button(ui, ButtonKind::Primary, Some(icon), label, size, installed && !blocked, None).clicked() {
-        ui.ctx().copy_text(command);
-        view.copied_at = Some(Instant::now());
-    }
+    // Only a single-line message can be sent from here: the other forms need a file,
+    // a pipe or an attachment the window does not have.
+    let offer_send = view.template == TemplateKind::Inline;
+    let gap = ui.spacing().item_spacing.x;
+    let copy_width = ui.available_width() - if offer_send { SEND_NOW_WIDTH + gap } else { 0.0 };
+    ui.horizontal(|ui| {
+        let (icon, label) = match (installed, copied) {
+            (false, _) => (Icon::Copy, "安裝後即可複製"),
+            (true, true) => (Icon::Check, "已複製"),
+            (true, false) => (Icon::Copy, "複製指令"),
+        };
+        let size = vec2(copy_width, CONTROL_HEIGHT);
+        if button(ui, ButtonKind::Primary, Some(icon), label, size, installed && !blocked, None).clicked() {
+            ui.ctx().copy_text(command);
+            view.copied_at = Some(Instant::now());
+        }
+        if offer_send {
+            let (icon, label) = match (view.sending, sent) {
+                (true, _) => (Icon::Send, "傳送中…"),
+                (false, true) => (Icon::Check, "已傳送"),
+                (false, false) => (Icon::Send, "立即傳送"),
+            };
+            let can_send = !view.message.trim().is_empty() && !view.sending;
+            let size = vec2(SEND_NOW_WIDTH, CONTROL_HEIGHT);
+            let tip = format!("現在就傳給 {}", entry.title);
+            if button(ui, ButtonKind::Secondary, Some(icon), label, size, can_send, Some(&tip)).clicked() {
+                *action = Action::Send {
+                    target: entry.target.clone(),
+                    message: view.message.trim().to_owned(),
+                };
+            }
+        }
+    });
 }
 
 /// Installing is about the app, not the recipient, so it lives under the header as
