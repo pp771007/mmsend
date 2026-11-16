@@ -121,6 +121,15 @@ impl User {
             full
         }
     }
+
+    /// `@alice 王小明`: the handle commands take, and the name a person recognizes.
+    /// Not in brackets: names often carry their own, as in `Amy (王小美)`.
+    pub fn label(&self) -> String {
+        match self.full_name() {
+            name if name.is_empty() => format!("@{}", self.username),
+            name => format!("@{} {name}", self.username),
+        }
+    }
 }
 
 fn is_cjk(c: char) -> bool {

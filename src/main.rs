@@ -8,6 +8,7 @@ mod icons;
 mod install;
 mod session;
 mod store;
+mod subcommands;
 mod target;
 mod theme;
 

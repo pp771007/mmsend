@@ -12,21 +12,21 @@ use crate::APP_NAME;
 use crate::api::{ApiError, NewPost};
 use crate::console;
 use crate::favorites;
-use crate::gui;
 use crate::session::{Error, Session};
 use crate::store::{self, SendRecord};
+use crate::subcommands;
 use crate::target::Target;
 
 /// Exit codes scripts can branch on. 2 matches what clap uses for bad arguments.
-const EXIT_OTHER: u8 = 1;
-const EXIT_USAGE: u8 = 2;
-const EXIT_NOT_LOGGED_IN: u8 = 3;
-const EXIT_LOGIN_EXPIRED: u8 = 4;
-const EXIT_TARGET_NOT_FOUND: u8 = 5;
-const EXIT_SEND_FAILED: u8 = 6;
+pub(crate) const EXIT_OTHER: u8 = 1;
+pub(crate) const EXIT_USAGE: u8 = 2;
+pub(crate) const EXIT_NOT_LOGGED_IN: u8 = 3;
+pub(crate) const EXIT_LOGIN_EXPIRED: u8 = 4;
+pub(crate) const EXIT_TARGET_NOT_FOUND: u8 = 5;
+pub(crate) const EXIT_SEND_FAILED: u8 = 6;
 
 const EXIT_CODES: [(u8, &str); 7] = [
-    (0, "已傳送"),
+    (0, "成功"),
     (EXIT_OTHER, "其他錯誤"),
     (EXIT_USAGE, "參數錯誤或訊息為空"),
     (EXIT_NOT_LOGGED_IN, "尚未登入"),
@@ -54,9 +54,6 @@ const SUMMARY_CHARS: usize = 60;
 const STDIN_MARKER: &str = "-";
 /// What cmd users type out of habit; it would otherwise be sent as a message.
 const WINDOWS_HELP_FLAG: &str = "/?";
-/// `mmsend login`. Every send names a recipient first, so a bare first argument
-/// can never have been meant as a message.
-const LOGIN_COMMAND: &str = "login";
 
 /// Hand-aligned (CJK characters are two columns wide).
 const HELP_TEMPLATE: &str = "\
@@ -71,6 +68,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend --user <帳號> --attach <檔案>  附加檔案，可同時加上訊息
   <其他指令> | mmsend --user <帳號>     傳送其他指令的輸出
   mmsend login                          開啟登入視窗，登入後自動關閉
+  mmsend status                         顯示版本、安裝與登入狀態
   mmsend                                開啟設定視窗
 
 參數：
@@ -176,13 +174,13 @@ fn usage_failure(error: &clap::Error) -> Failure {
     Failure::new(EXIT_USAGE, format!("{problem}\n請執行 mmsend -h 查看說明"))
 }
 
-struct Failure {
-    code: u8,
-    message: String,
+pub(crate) struct Failure {
+    pub(crate) code: u8,
+    pub(crate) message: String,
 }
 
 impl Failure {
-    fn new(code: u8, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: u8, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -190,14 +188,31 @@ impl Failure {
     }
 }
 
-pub fn run() -> ExitCode {
-    if std::env::args_os().nth(1).is_some_and(|arg| arg == WINDOWS_HELP_FLAG) {
-        // Printing help only fails if stdout is gone; there is nobody to tell then.
-        let _ = command().print_help();
-        return ExitCode::SUCCESS;
+/// Prints the outcome where scripts look for it: stdout on success, stderr otherwise.
+pub(crate) fn report(result: Result<String, Failure>) -> ExitCode {
+    match result {
+        Ok(output) => {
+            println!("{output}");
+            ExitCode::SUCCESS
+        }
+        Err(failure) => {
+            eprintln!("{}", failure.message);
+            ExitCode::from(failure.code)
+        }
     }
-    if std::env::args_os().nth(1).is_some_and(|arg| arg == LOGIN_COMMAND) {
-        return login();
+}
+
+pub fn run() -> ExitCode {
+    let first = std::env::args_os().nth(1);
+    match first.as_ref().and_then(|arg| arg.to_str()) {
+        Some(WINDOWS_HELP_FLAG) => {
+            // Printing help only fails if stdout is gone; there is nobody to tell then.
+            let _ = command().print_help();
+            return ExitCode::SUCCESS;
+        }
+        Some(subcommands::LOGIN) => return report(subcommands::login()),
+        Some(subcommands::STATUS) => return report(subcommands::status()),
+        _ => {}
     }
     let mut record = SendRecord::starting_now();
     let args = match parse_args() {
@@ -232,24 +247,6 @@ pub fn run() -> ExitCode {
     };
     log(&record);
     code
-}
-
-/// Waits while the person logs in; the caller only ever sees the outcome, never the password.
-fn login() -> ExitCode {
-    let failure = match gui::run_login() {
-        Ok(true) => match store::load_config() {
-            Ok(Some(config)) => {
-                println!("已登入 @{}（{}）", config.username, config.server_url.trim_end_matches('/'));
-                return ExitCode::SUCCESS;
-            }
-            Ok(None) => Failure::new(EXIT_OTHER, "登入資料未能儲存"),
-            Err(e) => Failure::new(EXIT_OTHER, e),
-        },
-        Ok(false) => Failure::new(EXIT_NOT_LOGGED_IN, "登入視窗已關閉，尚未登入"),
-        Err(e) => Failure::new(EXIT_OTHER, e),
-    };
-    eprintln!("{}", failure.message);
-    ExitCode::from(failure.code)
 }
 
 fn log(record: &SendRecord) {
@@ -369,7 +366,7 @@ fn preview(text: &str) -> String {
     format!("{head}\n…")
 }
 
-fn with_retries<T>(mut attempt: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+pub(crate) fn with_retries<T>(mut attempt: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
     let mut delays = RETRY_DELAYS.iter();
     loop {
         match attempt() {
@@ -441,16 +438,26 @@ fn read_stdin() -> Result<String, Failure> {
     Ok(console::decode_piped_text(&bytes))
 }
 
-fn session_failure(error: Error, target: &Target) -> Failure {
+/// The failures every command that talks to the server shares.
+pub(crate) fn login_failure(error: Error) -> Failure {
     match error {
         Error::NotLoggedIn => Failure::new(
             EXIT_NOT_LOGGED_IN,
-            format!("尚未登入：請從開始功能表開啟「{APP_NAME}」並登入"),
+            format!("尚未登入：請執行 mmsend login，或從開始功能表開啟「{APP_NAME}」登入"),
         ),
+        // Reaching the server with a stored password it refuses: it was changed.
         Error::Api(ApiError::Unauthorized) => Failure::new(
             EXIT_LOGIN_EXPIRED,
-            format!("登入已失效：請從開始功能表開啟「{APP_NAME}」重新登入"),
+            format!("登入已失效：請執行 mmsend login，或從開始功能表開啟「{APP_NAME}」重新登入"),
         ),
+        Error::Api(e) => Failure::new(EXIT_SEND_FAILED, format!("連線失敗，{e}")),
+        Error::Store(e) => Failure::new(EXIT_OTHER, e),
+    }
+}
+
+fn session_failure(error: Error, target: &Target) -> Failure {
+    match error {
+        Error::NotLoggedIn | Error::Api(ApiError::Unauthorized) | Error::Store(_) => login_failure(error),
         Error::Api(ApiError::NotFound) => Failure::new(
             EXIT_TARGET_NOT_FOUND,
             format!("找不到 {target}：請開啟「{APP_NAME}」重新複製指令"),
@@ -466,7 +473,6 @@ fn session_failure(error: Error, target: &Target) -> Failure {
             Failure::new(EXIT_SEND_FAILED, "伺服器未開放附加檔案")
         }
         Error::Api(e) => Failure::new(EXIT_SEND_FAILED, format!("傳送失敗，{e}")),
-        Error::Store(e) => Failure::new(EXIT_OTHER, e),
     }
 }
 
