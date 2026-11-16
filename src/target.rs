@@ -90,26 +90,77 @@ impl Target {
         !message.contains(['"', '\n', '\r'])
     }
 
-    pub fn resolve_channel_id(&self, session: &mut Session) -> Result<String, Error> {
+    /// Who this is, read-only: a dry run must not open a direct or group channel.
+    pub fn look_up(&self, session: &mut Session) -> Result<Recipient, Error> {
         match self {
             Target::User(username) => {
-                let me = session.config.user_id.clone();
                 let other = session.call(|c| c.user_by_username(username))?;
-                Ok(session.call(|c| c.direct_channel(&me, &other.id))?.id)
+                Ok(Recipient {
+                    label: other.label(),
+                    place: Place::Direct(other.id),
+                })
             }
             Target::Channel { team, channel } => {
-                Ok(session.call(|c| c.channel_by_name(team, channel))?.id)
+                let found = session.call(|c| c.channel_by_name(team, channel))?;
+                Ok(Recipient {
+                    label: format!("{self} {}", found.display_name),
+                    place: Place::Channel(found.id),
+                })
             }
             Target::Group(members) => {
                 let users = session.call(|c| c.users_by_usernames(members))?;
                 if users.len() != members.len() {
                     return Err(Error::Api(ApiError::NotFound));
                 }
-                let mut ids: Vec<String> = users.into_iter().map(|u| u.id).collect();
-                ids.push(session.config.user_id.clone());
+                Ok(Recipient {
+                    label: format!("群組 {}", users.iter().map(|u| u.label()).collect::<Vec<_>>().join("、")),
+                    place: Place::Group(users.into_iter().map(|u| u.id).collect()),
+                })
+            }
+            Target::ChannelId(id) => Ok(Recipient {
+                label: self.to_string(),
+                place: Place::Channel(id.clone()),
+            }),
+        }
+    }
+}
+
+/// A target found on the server.
+pub struct Recipient {
+    /// `@alice 王小明`, `dev/town-square 公眾大廳`: what a person checks before sending.
+    pub label: String,
+    place: Place,
+}
+
+enum Place {
+    Channel(String),
+    /// The other person's user id.
+    Direct(String),
+    /// The other members' user ids.
+    Group(Vec<String>),
+}
+
+impl Recipient {
+    /// The channel to post in, opening the direct or group channel on first use.
+    pub fn channel_id(&self, session: &mut Session) -> Result<String, Error> {
+        let me = session.config.user_id.clone();
+        match &self.place {
+            Place::Channel(id) => Ok(id.clone()),
+            Place::Direct(other) => Ok(session.call(|c| c.direct_channel(&me, other))?.id),
+            Place::Group(others) => {
+                let mut ids = others.clone();
+                ids.push(me);
                 Ok(session.call(|c| c.group_channel(&ids))?.id)
             }
-            Target::ChannelId(id) => Ok(id.clone()),
+        }
+    }
+
+    /// A channel can be found yet refuse the post (a public one not joined); direct
+    /// and group channels are opened for the sender, so they cannot.
+    pub fn existing_channel_id(&self) -> Option<&str> {
+        match &self.place {
+            Place::Channel(id) => Some(id),
+            Place::Direct(_) | Place::Group(_) => None,
         }
     }
 }

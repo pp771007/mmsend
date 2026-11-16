@@ -126,6 +126,10 @@ struct Args {
     #[arg(long)]
     code: bool,
 
+    /// 試跑：檢查收件對象（顯示姓名）與內容，不傳送
+    #[arg(long)]
+    dry_run: bool,
+
     /// 顯示說明
     #[arg(short = 'h', long, action = ArgAction::Help)]
     help: Option<bool>,
@@ -238,10 +242,14 @@ pub fn run() -> ExitCode {
             return ExitCode::from(failure.code);
         }
     };
+    if args.dry_run {
+        // Nothing was sent, so nothing goes in the send log.
+        return report(dry_run(&args));
+    }
     let code = match send(args, &mut record) {
-        Ok(target) => {
+        Ok(recipient) => {
             record.ok = true;
-            record.detail = format!("已傳送給 {target}");
+            record.detail = format!("已傳送給 {recipient}");
             println!("{}", record.detail);
             ExitCode::SUCCESS
         }
@@ -253,6 +261,34 @@ pub fn run() -> ExitCode {
     };
     log(&record);
     code
+}
+
+/// Everything a send checks, without sending: who it goes to by name, and what.
+fn dry_run(args: &Args) -> Result<String, Failure> {
+    let target = parse_target(args)?;
+    let outgoing = compose(read_message(args)?, args.code, read_attachments(&args.attach)?)?;
+    let mut session = Session::load().map_err(|e| session_failure(e, &target))?;
+    let recipient = with_retries(|| target.look_up(&mut session)).map_err(|e| session_failure(e, &target))?;
+    if let Some(channel_id) = recipient.existing_channel_id() {
+        with_retries(|| session.call(|c| c.my_membership(channel_id))).map_err(|e| match e {
+            Error::Api(ApiError::NotFound) => session_failure(Error::Api(ApiError::Forbidden), &target),
+            e => session_failure(e, &target),
+        })?;
+    }
+    let mut lines = vec![
+        "試跑，未傳送".to_owned(),
+        format!("收件對象：{}", recipient.label),
+    ];
+    let text = summarize_text(&outgoing.message);
+    if !text.is_empty() {
+        let line_count = outgoing.message.lines().count();
+        lines.push(format!("內容：{text}（共 {line_count} 行）"));
+    }
+    if !outgoing.files.is_empty() {
+        let names: Vec<&str> = outgoing.files.iter().map(|file| file.name.as_str()).collect();
+        lines.push(format!("附件：{}", names.join("、")));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn log(record: &SendRecord) {
@@ -276,14 +312,16 @@ fn summarize(outgoing: &Outgoing) -> String {
     if text.is_empty() { files } else { format!("{text}（{files}）") }
 }
 
-fn send(args: Args, record: &mut SendRecord) -> Result<Target, Failure> {
+/// Returns who it went to, by name.
+fn send(args: Args, record: &mut SendRecord) -> Result<String, Failure> {
     let target = parse_target(&args)?;
     record.target = target.to_string();
     let outgoing = compose(read_message(&args)?, args.code, read_attachments(&args.attach)?)?;
     record.summary = summarize(&outgoing);
     let mut session = Session::load().map_err(|e| session_failure(e, &target))?;
-    let channel_id = with_retries(|| target.resolve_channel_id(&mut session))
-        .map_err(|e| session_failure(e, &target))?;
+    let recipient = with_retries(|| target.look_up(&mut session)).map_err(|e| session_failure(e, &target))?;
+    let channel_id =
+        with_retries(|| recipient.channel_id(&mut session)).map_err(|e| session_failure(e, &target))?;
     let mut file_ids = Vec::with_capacity(outgoing.files.len());
     for file in &outgoing.files {
         let id = with_retries(|| session.call(|c| c.upload_file(&channel_id, &file.name, &file.bytes)))
@@ -298,7 +336,7 @@ fn send(args: Args, record: &mut SendRecord) -> Result<Target, Failure> {
         file_ids: &file_ids,
     };
     with_retries(|| session.call(|c| c.create_post(&post))).map_err(|e| session_failure(e, &target))?;
-    Ok(target)
+    Ok(recipient.label)
 }
 
 struct Attachment {
@@ -466,7 +504,7 @@ fn session_failure(error: Error, target: &Target) -> Failure {
         Error::NotLoggedIn | Error::Api(ApiError::Unauthorized) | Error::Store(_) => login_failure(error),
         Error::Api(ApiError::NotFound) => Failure::new(
             EXIT_TARGET_NOT_FOUND,
-            format!("找不到 {target}：請開啟「{APP_NAME}」重新複製指令"),
+            format!("找不到 {target}：請以 mmsend find <姓名> 查詢，或開啟「{APP_NAME}」重新複製指令"),
         ),
         Error::Api(ApiError::Forbidden) => Failure::new(
             EXIT_TARGET_NOT_FOUND,

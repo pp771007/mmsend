@@ -972,16 +972,19 @@ impl App {
                 self.spawn(move || {
                     let mut session = lock(&session);
                     let pending_post_id = session.new_pending_post_id();
-                    let result = target.resolve_channel_id(&mut session).and_then(|channel_id| {
-                        session.call(|c| {
-                            c.create_post(&NewPost {
-                                channel_id: &channel_id,
-                                message: &message,
-                                pending_post_id: &pending_post_id,
-                                file_ids: &[],
+                    let result = target
+                        .look_up(&mut session)
+                        .and_then(|recipient| recipient.channel_id(&mut session))
+                        .and_then(|channel_id| {
+                            session.call(|c| {
+                                c.create_post(&NewPost {
+                                    channel_id: &channel_id,
+                                    message: &message,
+                                    pending_post_id: &pending_post_id,
+                                    file_ids: &[],
+                                })
                             })
-                        })
-                    });
+                        });
                     Msg::Sent(result)
                 });
             }

@@ -319,6 +319,11 @@ impl Client {
         ))
     }
 
+    /// `Err(NotFound)` when the user is not a member of the channel.
+    pub fn my_membership(&self, channel_id: &str) -> Result<(), ApiError> {
+        send_json::<IgnoredAny>(self.request(Method::GET, &["channels", channel_id, "members", "me"])).map(|_| ())
+    }
+
     /// Returns the direct-message channel between two users, creating it on first use.
     pub fn direct_channel(&self, user_a: &str, user_b: &str) -> Result<Channel, ApiError> {
         send_json(self.request(Method::POST, &["channels", "direct"]).json(&[user_a, user_b]))
