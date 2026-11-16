@@ -54,7 +54,10 @@ pub struct Config {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Secrets {
     /// Kept so an expired session token can be renewed without the user noticing.
-    pub password: String,
+    /// `None` when that cannot work: a personal access token needs no renewing, and
+    /// an account with two-step verification needs a fresh code each time.
+    #[serde(default)]
+    pub password: Option<String>,
     pub token: String,
 }
 

@@ -531,8 +531,9 @@ pub(crate) fn login_failure(error: Error) -> Failure {
             EXIT_NOT_LOGGED_IN,
             format!("尚未登入：請執行 mmsend login，或從開始功能表開啟「{APP_NAME}」登入"),
         ),
-        // Reaching the server with a stored password it refuses: it was changed.
-        Error::Api(ApiError::Unauthorized) => Failure::new(
+        // Reaching the server with a stored password it refuses: it was changed, or
+        // the account has since turned on two-step verification.
+        Error::Api(ApiError::Unauthorized | ApiError::MfaRequired | ApiError::MfaCodeWrong) => Failure::new(
             EXIT_LOGIN_EXPIRED,
             format!("登入已失效：請執行 mmsend login，或從開始功能表開啟「{APP_NAME}」重新登入"),
         ),
@@ -543,7 +544,9 @@ pub(crate) fn login_failure(error: Error) -> Failure {
 
 fn session_failure(error: Error, target: &Target) -> Failure {
     match error {
-        Error::NotLoggedIn | Error::Api(ApiError::Unauthorized) | Error::Store(_) => login_failure(error),
+        Error::NotLoggedIn
+        | Error::Api(ApiError::Unauthorized | ApiError::MfaRequired | ApiError::MfaCodeWrong)
+        | Error::Store(_) => login_failure(error),
         Error::Api(ApiError::NotFound) => Failure::new(
             EXIT_TARGET_NOT_FOUND,
             format!("找不到 {target}：請以 mmsend find <姓名> 查詢，或開啟「{APP_NAME}」重新複製指令"),

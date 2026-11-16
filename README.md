@@ -5,7 +5,8 @@
 ## 開始使用
 
 1. 至 [Releases](../../releases) 下載 `mmsend.exe`。
-2. 按兩下開啟，輸入 Mattermost 網址、帳號與密碼登入。
+2. 按兩下開啟，輸入 Mattermost 伺服器網址、帳號與密碼登入；有開兩步驟驗證會接著要驗證碼。
+   公司用 SSO 登入、或不想在電腦上存密碼時，改選「存取權杖」，貼上在 Mattermost「個人設定 › 安全性」產生的個人存取權杖。
    - 首次開啟時若出現「Windows 已保護您的電腦」，請點選「其他資訊」→「仍要執行」。
 3. 選擇人員或頻道。首次使用時請按「安裝」：程式會複製到 `%LOCALAPPDATA%\Programs\mmsend`、
    加入使用者 PATH，並在開始功能表建立「Mattermost 指令傳訊」。之後只需輸入 `mmsend` 即可執行，
@@ -76,8 +77,9 @@ mmsend delete --last                 :: 刪除最近一次傳送的訊息（或 
 
 - 密碼與登入 token 存放於 **Windows 認證管理員**（控制台 → 認證管理員 → Windows 認證 → `mmsend`），
   由 Windows 以您的帳號加密，換成其他 Windows 帳號或其他電腦皆無法讀取。
-- 網址與帳號存放於 `%APPDATA%\mmsend\config.json`。
+- 伺服器網址與帳號存放於 `%APPDATA%\mmsend\config.json`。
 - token 過期時，程式會自動以儲存的密碼重新登入。按「登出」會清除密碼與 token。
+- 用存取權杖或兩步驟驗證登入時不保存密碼；登入過期（或權杖被撤銷）時需要重新登入。
 
 ## 更新
 

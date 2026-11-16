@@ -18,6 +18,10 @@ pub const USER_SEARCH_LIMIT: u32 = 50;
 /// Mattermost caps group messages at 8 members; 200 is the API's page maximum.
 const GROUP_MEMBER_LIMIT: &str = "200";
 
+/// Mattermost's error ids for a login that needs, or got a wrong, two-step verification code.
+const MFA_REQUIRED_ID: &str = "mfa.validate_token.authenticate.app_error";
+const MFA_CODE_WRONG_ID: &str = "api.user.check_user_mfa.bad_code.app_error";
+
 pub const CHANNEL_OPEN: &str = "O";
 pub const CHANNEL_PRIVATE: &str = "P";
 pub const CHANNEL_DIRECT: &str = "D";
@@ -27,6 +31,10 @@ pub const CHANNEL_GROUP: &str = "G";
 pub enum ApiError {
     /// 401: wrong password on login, or an expired / revoked session token.
     Unauthorized,
+    /// 401 on login: the account has two-step verification and no code was given.
+    MfaRequired,
+    /// 401 on login: the code was wrong, or already used (each works once).
+    MfaCodeWrong,
     NotFound,
     Forbidden,
     Server { status: u16, message: String },
@@ -51,6 +59,8 @@ impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ApiError::Unauthorized => write!(f, "未授權（401）"),
+            ApiError::MfaRequired => write!(f, "需要兩步驟驗證碼"),
+            ApiError::MfaCodeWrong => write!(f, "兩步驟驗證碼錯誤"),
             ApiError::NotFound => write!(f, "找不到（404）"),
             ApiError::Forbidden => write!(f, "無權限（403）"),
             ApiError::Server { status, message } => write!(f, "伺服器回應 {status}：{message}"),
@@ -69,7 +79,7 @@ impl fmt::Display for ApiError {
 pub fn normalize_server_url(input: &str) -> Result<Url, ApiError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(ApiError::InvalidUrl("請輸入網址".into()));
+        return Err(ApiError::InvalidUrl("請輸入伺服器網址".into()));
     }
     let with_scheme = if trimmed.contains("://") {
         trimmed.to_owned()
@@ -77,14 +87,14 @@ pub fn normalize_server_url(input: &str) -> Result<Url, ApiError> {
         format!("https://{trimmed}")
     };
     let parsed =
-        Url::parse(&with_scheme).map_err(|_| ApiError::InvalidUrl("網址格式錯誤".into()))?;
+        Url::parse(&with_scheme).map_err(|_| ApiError::InvalidUrl("伺服器網址格式錯誤".into()))?;
     match parsed.scheme() {
         "https" => {}
         "http" if is_loopback(parsed.host_str()) => {}
-        _ => return Err(ApiError::InvalidUrl("網址須以 https:// 開頭".into())),
+        _ => return Err(ApiError::InvalidUrl("伺服器網址須以 https:// 開頭".into())),
     }
     let origin = parsed.origin().ascii_serialization();
-    Url::parse(&origin).map_err(|_| ApiError::InvalidUrl("網址格式錯誤".into()))
+    Url::parse(&origin).map_err(|_| ApiError::InvalidUrl("伺服器網址格式錯誤".into()))
 }
 
 fn is_loopback(host: Option<&str>) -> bool {
@@ -166,6 +176,9 @@ pub struct Channel {
 struct LoginRequest<'a> {
     login_id: &'a str,
     password: &'a str,
+    /// The two-step verification code, for accounts that have it on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -209,6 +222,9 @@ struct UploadedFile {
 struct ServerError {
     #[serde(default)]
     message: String,
+    /// Mattermost's error id, such as `api.user.login.invalid_credentials_email_username`.
+    #[serde(default)]
+    id: String,
 }
 
 /// Cheap to clone: the HTTP connection pool is shared.
@@ -238,10 +254,15 @@ impl Client {
     }
 
     /// Password login. Returns the new session token and the logged-in user.
-    pub fn login(&self, login_id: &str, password: &str) -> Result<(String, User), ApiError> {
+    /// `mfa_code`: for an account with two-step verification on.
+    pub fn login(&self, login_id: &str, password: &str, mfa_code: Option<&str>) -> Result<(String, User), ApiError> {
         let response = self
             .request(Method::POST, &["users", "login"])
-            .json(&LoginRequest { login_id, password })
+            .json(&LoginRequest {
+                login_id,
+                password,
+                token: mfa_code,
+            })
             .send()
             .map_err(|e| ApiError::Network(error_chain(&e)))?;
         let response = check_status(response)?;
@@ -417,7 +438,10 @@ fn check_status(response: Response) -> Result<Response, ApiError> {
         return Ok(response);
     }
     match status {
-        StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized),
+        StatusCode::UNAUTHORIZED => {
+            let id = response.json::<ServerError>().map(|e| e.id).unwrap_or_default();
+            Err(unauthorized(&id))
+        }
         StatusCode::NOT_FOUND => Err(ApiError::NotFound),
         StatusCode::FORBIDDEN => Err(ApiError::Forbidden),
         _ => {
@@ -430,6 +454,16 @@ fn check_status(response: Response) -> Result<Response, ApiError> {
                 message,
             })
         }
+    }
+}
+
+/// A 401 by Mattermost's error id: a two-step verification code missing or wrong
+/// needs telling apart from a wrong password, or the person keeps retyping it.
+fn unauthorized(error_id: &str) -> ApiError {
+    match error_id {
+        MFA_REQUIRED_ID => ApiError::MfaRequired,
+        MFA_CODE_WRONG_ID => ApiError::MfaCodeWrong,
+        _ => ApiError::Unauthorized,
     }
 }
 
@@ -457,6 +491,16 @@ fn error_chain(error: &dyn std::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_or_wrong_verification_code_is_not_a_wrong_password() {
+        assert!(matches!(unauthorized(MFA_REQUIRED_ID), ApiError::MfaRequired));
+        assert!(matches!(unauthorized(MFA_CODE_WRONG_ID), ApiError::MfaCodeWrong));
+        assert!(matches!(
+            unauthorized("api.user.login.invalid_credentials_email_username"),
+            ApiError::Unauthorized
+        ));
+    }
 
     #[test]
     fn pasted_browser_url_keeps_only_the_origin() {

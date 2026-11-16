@@ -34,8 +34,8 @@ const WINDOW_MIN_SIZE: [f32; 2] = [720.0, 520.0];
 const WINDOW_ICON_SIZE: u32 = 64;
 const LOGO_SIZE: f32 = 56.0;
 const LOGIN_CARD_WIDTH: f32 = 380.0;
-/// Rough card height, only used to centre the login card vertically.
-const LOGIN_CARD_HEIGHT: f32 = 500.0;
+/// Rough card height, to centre the login card on the first frame before it is measured.
+const LOGIN_CARD_HEIGHT: f32 = 540.0;
 const CONTROL_HEIGHT: f32 = 40.0;
 const ICON_BUTTON_SIZE: f32 = 30.0;
 const BUTTON_ICON_SIZE: f32 = 16.0;
@@ -540,16 +540,38 @@ enum UninstallStep {
     Done,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum LoginMethod {
+    #[default]
+    Password,
+    /// A personal access token: for SSO servers, or to keep no password on this PC.
+    AccessToken,
+}
+
+const LOGIN_METHODS: [(LoginMethod, &str); 2] = [
+    (LoginMethod::Password, "帳號密碼"),
+    (LoginMethod::AccessToken, "存取權杖"),
+];
+
 #[derive(Default)]
 struct LoginForm {
+    method: LoginMethod,
     server: String,
     login_id: String,
     password: String,
+    access_token: String,
+    /// Shown once the server says the account has two-step verification.
+    needs_mfa_code: bool,
+    mfa_code: String,
+    /// Under the code field, where the person is looking.
+    mfa_error: Option<String>,
     show_password: bool,
     busy: bool,
     focus_pending: bool,
     error: Option<String>,
     error_detail: Option<String>,
+    /// Measured last frame, to centre the card.
+    card_height: Option<f32>,
 }
 
 impl LoginForm {
@@ -568,16 +590,39 @@ impl LoginForm {
     }
 
     fn show_error(&mut self, error: &Error) {
+        self.busy = false;
+        self.mfa_error = None;
+        // Told at the code field rather than in the box under the button: the new,
+        // focused field says what to do, and the card stays short enough to fit.
+        match error {
+            Error::Api(ApiError::MfaRequired) => {
+                self.needs_mfa_code = true;
+                self.focus_pending = true;
+                self.error = None;
+                return;
+            }
+            Error::Api(ApiError::MfaCodeWrong) => {
+                self.mfa_code.clear();
+                self.focus_pending = true;
+                self.error = None;
+                // Each code works once, so a retry within the same 30 seconds fails too.
+                self.mfa_error = Some("驗證碼錯誤，請輸入下一組".to_owned());
+                return;
+            }
+            _ => {}
+        }
         let (headline, detail) = match error {
+            Error::Api(ApiError::Unauthorized) if self.method == LoginMethod::AccessToken => {
+                ("存取權杖無效或已撤銷".to_owned(), None)
+            }
             Error::Api(ApiError::Unauthorized) => ("帳號或密碼錯誤".to_owned(), None),
             Error::Api(ApiError::InvalidUrl(reason)) => (reason.clone(), None),
-            Error::Api(ApiError::NotFound) => ("此網址不是 Mattermost 伺服器，請確認網址".to_owned(), None),
+            Error::Api(ApiError::NotFound) => ("這不是 Mattermost 伺服器，請確認伺服器網址".to_owned(), None),
             Error::Api(ApiError::Network(detail)) => {
-                ("無法連線至伺服器，請確認網址".to_owned(), Some(detail.clone()))
+                ("無法連線至伺服器，請確認伺服器網址".to_owned(), Some(detail.clone()))
             }
             other => (other.to_string(), None),
         };
-        self.busy = false;
         self.error = Some(headline);
         self.error_detail = detail;
     }
@@ -1058,11 +1103,23 @@ impl App {
                 form.busy = true;
                 form.error = None;
                 form.error_detail = None;
-                let (server, login_id, password) =
-                    (form.server.clone(), form.login_id.clone(), form.password.clone());
-                self.spawn(move || {
-                    Msg::LoggedIn(Session::login(&server, &login_id, &password).map(Box::new))
-                });
+                let server = form.server.clone();
+                match form.method {
+                    LoginMethod::Password => {
+                        let (login_id, password) = (form.login_id.clone(), form.password.clone());
+                        let mfa_code = form.needs_mfa_code.then(|| form.mfa_code.trim().to_owned());
+                        self.spawn(move || {
+                            let session = Session::login(&server, &login_id, &password, mfa_code.as_deref());
+                            Msg::LoggedIn(session.map(Box::new))
+                        });
+                    }
+                    LoginMethod::AccessToken => {
+                        let access_token = form.access_token.clone();
+                        self.spawn(move || {
+                            Msg::LoggedIn(Session::login_with_token(&server, &access_token).map(Box::new))
+                        });
+                    }
+                }
             }
             Action::Logout => {
                 let Screen::Main(view) = &self.screen else {
@@ -1736,20 +1793,28 @@ fn login_ui(ui: &mut egui::Ui, form: &mut LoginForm, logo: &TextureHandle, p: &P
     egui::CentralPanel::default()
         .frame(Frame::default().fill(p.background))
         .show(ui, |ui| {
-            ui.add_space(((ui.available_height() - LOGIN_CARD_HEIGHT) / 2.0).max(PAGE_MARGIN as f32));
-            centered_column(ui, LOGIN_CARD_WIDTH, |ui| {
-                Frame::default()
-                    .fill(p.surface)
-                    .stroke(Stroke::new(1.0, p.border))
-                    .corner_radius(CornerRadius::same(CARD_RADIUS))
-                    .inner_margin(Margin::same(28))
-                    .shadow(Shadow {
-                        offset: [0, 8],
-                        blur: 28,
-                        spread: 0,
-                        color: Color32::from_black_alpha(22),
-                    })
-                    .show(ui, |ui| login_card(ui, form, logo, p, &mut action));
+            // Centred by the card's height last frame: it grows with the verification
+            // code field and errors. Scrolls when the window is shorter than the card.
+            let card_height = form.card_height.unwrap_or(LOGIN_CARD_HEIGHT);
+            let top = ((ui.available_height() - card_height) / 2.0).max(PAGE_MARGIN as f32);
+            egui::ScrollArea::vertical().id_salt("login").show(ui, |ui| {
+                ui.add_space(top);
+                centered_column(ui, LOGIN_CARD_WIDTH, |ui| {
+                    let card = Frame::default()
+                        .fill(p.surface)
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(CornerRadius::same(CARD_RADIUS))
+                        .inner_margin(Margin::same(28))
+                        .shadow(Shadow {
+                            offset: [0, 8],
+                            blur: 28,
+                            spread: 0,
+                            color: Color32::from_black_alpha(22),
+                        })
+                        .show(ui, |ui| login_card(ui, form, logo, p, &mut action));
+                    form.card_height = Some(card.response.rect.height());
+                });
+                ui.add_space(f32::from(PAGE_MARGIN));
             });
         });
     action
@@ -1757,15 +1822,36 @@ fn login_ui(ui: &mut egui::Ui, form: &mut LoginForm, logo: &TextureHandle, p: &P
 
 fn login_card(ui: &mut egui::Ui, form: &mut LoginForm, logo: &TextureHandle, p: &Palette, action: &mut Action) {
     ui.set_width(ui.available_width());
+    // The code gets a step of its own once the password is accepted, as sign-in pages do.
+    let verifying = form.needs_mfa_code && form.method == LoginMethod::Password;
+    let subtitle = if verifying {
+        format!("{} 的兩步驟驗證", form.login_id.trim())
+    } else {
+        "登入您的 Mattermost 帳號".to_owned()
+    };
     ui.vertical_centered(|ui| {
         ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), Vec2::splat(LOGO_SIZE))));
         ui.add_space(8.0);
         ui.label(RichText::new(APP_NAME).size(21.0).strong().color(p.text));
-        ui.label(RichText::new("登入您的 Mattermost 帳號").size(13.5).color(p.text_weak));
+        ui.label(RichText::new(subtitle).size(13.5).color(p.text_weak));
     });
     ui.add_space(18.0);
+    if verifying {
+        mfa_step(ui, form, p, action);
+        return;
+    }
 
-    let server_label = field_label(ui, "網址", p);
+    if segmented(ui, &mut form.method, &LOGIN_METHODS, p) {
+        form.error = None;
+        form.error_detail = None;
+        form.focus_pending = true;
+    }
+    ui.add_space(12.0);
+
+    // Each field with whether it is still empty, in order: Enter moves along them,
+    // the first empty one gets the focus, and logging in needs them all.
+    let mut fields: Vec<(Response, bool)> = Vec::new();
+    let server_label = field_label(ui, "伺服器網址", p);
     let server = ui
         .add(
             TextEdit::singleline(&mut form.server)
@@ -1774,58 +1860,71 @@ fn login_card(ui: &mut egui::Ui, form: &mut LoginForm, logo: &TextureHandle, p: 
                 .desired_width(f32::INFINITY),
         )
         .labelled_by(server_label);
+    fields.push((server, form.server.trim().is_empty()));
     ui.add_space(4.0);
-    let login_label = field_label(ui, "帳號", p);
-    let login_id = ui
-        .add(
-            TextEdit::singleline(&mut form.login_id)
-                .margin(INPUT_MARGIN)
-                .desired_width(f32::INFINITY),
-        )
-        .labelled_by(login_label);
-    ui.add_space(4.0);
-    let password_label = field_label(ui, "密碼", p);
-    let password = ui
-        .add(
-            TextEdit::singleline(&mut form.password)
-                .password(!form.show_password)
-                .margin(PASSWORD_MARGIN)
-                .desired_width(f32::INFINITY),
-        )
-        .labelled_by(password_label);
-    password_toggle(ui, &password, &mut form.show_password, p);
+    match form.method {
+        LoginMethod::Password => {
+            let login_label = field_label(ui, "帳號", p);
+            let login_id = ui
+                .add(
+                    TextEdit::singleline(&mut form.login_id)
+                        .margin(INPUT_MARGIN)
+                        .desired_width(f32::INFINITY),
+                )
+                .labelled_by(login_label);
+            fields.push((login_id, form.login_id.trim().is_empty()));
+            ui.add_space(4.0);
+            let password_label = field_label(ui, "密碼", p);
+            let password = ui
+                .add(
+                    TextEdit::singleline(&mut form.password)
+                        .password(!form.show_password)
+                        .margin(PASSWORD_MARGIN)
+                        .desired_width(f32::INFINITY),
+                )
+                .labelled_by(password_label);
+            password_toggle(ui, &password, &mut form.show_password, p);
+            fields.push((password, form.password.is_empty()));
+        }
+        LoginMethod::AccessToken => {
+            let token_label = field_label(ui, "存取權杖", p);
+            let token = ui
+                .add(
+                    TextEdit::singleline(&mut form.access_token)
+                        .password(!form.show_password)
+                        .margin(PASSWORD_MARGIN)
+                        .desired_width(f32::INFINITY),
+                )
+                .labelled_by(token_label);
+            password_toggle(ui, &token, &mut form.show_password, p);
+            ui.label(RichText::new("於 Mattermost「個人設定 › 安全性」產生").small().color(p.text_weak));
+            fields.push((token, form.access_token.trim().is_empty()));
+        }
+    }
     // Like native password boxes, switch the IME off: a Chinese IME would show the
     // password in its composition window, and none of these fields take Chinese.
-    if server.has_focus() || login_id.has_focus() || password.has_focus() {
+    if fields.iter().any(|(field, _)| field.has_focus()) {
         ui.ctx().output_mut(|o| o.ime = None);
     }
 
     if form.focus_pending {
         form.focus_pending = false;
-        let first_empty = [
-            (form.server.trim().is_empty(), &server),
-            (form.login_id.trim().is_empty(), &login_id),
-        ]
-        .into_iter()
-        .find(|(empty, _)| *empty)
-        .map(|(_, field)| field)
-        .unwrap_or(&password);
-        first_empty.request_focus();
+        let first_empty = fields.iter().find(|(_, empty)| *empty).or(fields.last());
+        if let Some((field, _)) = first_empty {
+            field.request_focus();
+        }
     }
 
     let enter_from = |field: &Response| field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-    if enter_from(&server) {
-        login_id.request_focus();
-    } else if enter_from(&login_id) {
-        password.request_focus();
+    for pair in fields.windows(2) {
+        if enter_from(&pair[0].0) {
+            pair[1].0.request_focus();
+        }
     }
-    let pressed_enter = enter_from(&password);
+    let pressed_enter = fields.last().is_some_and(|(field, _)| enter_from(field));
 
     ui.add_space(16.0);
-    let ready = !form.busy
-        && !form.server.trim().is_empty()
-        && !form.login_id.trim().is_empty()
-        && !form.password.is_empty();
+    let ready = !form.busy && fields.iter().all(|(_, empty)| !empty);
     let label = if form.busy { "登入中…" } else { "登入" };
     let size = vec2(ui.available_width(), CONTROL_HEIGHT);
     let clicked = button(ui, ButtonKind::Primary, Some(Icon::Login), label, size, ready, None).clicked();
@@ -1833,6 +1932,67 @@ fn login_card(ui: &mut egui::Ui, form: &mut LoginForm, logo: &TextureHandle, p: 
         *action = Action::Login;
     }
 
+    if let Some(error) = &form.error {
+        ui.add_space(10.0);
+        error_box(ui, error, form.error_detail.as_deref(), p);
+    }
+}
+
+/// The second step for an account with two-step verification: only the code, and a way back.
+fn mfa_step(ui: &mut egui::Ui, form: &mut LoginForm, p: &Palette, action: &mut Action) {
+    let code_label = field_label(ui, "驗證碼", p);
+    let wrong = form.mfa_error.is_some();
+    let code = ui
+        .scope(|ui| {
+            // A wrong code outlines the field in red, whether or not it has the focus.
+            if wrong {
+                let visuals = ui.visuals_mut();
+                for state in [&mut visuals.widgets.inactive, &mut visuals.widgets.hovered, &mut visuals.widgets.active] {
+                    state.bg_stroke.color = p.danger;
+                }
+                visuals.selection.stroke.color = p.danger;
+            }
+            ui.add(
+                TextEdit::singleline(&mut form.mfa_code)
+                    .hint_text("驗證器 App 上的 6 位數字")
+                    .margin(INPUT_MARGIN)
+                    .desired_width(f32::INFINITY),
+            )
+            .labelled_by(code_label)
+        })
+        .inner;
+    if code.has_focus() {
+        ui.ctx().output_mut(|o| o.ime = None);
+    }
+    if form.focus_pending {
+        form.focus_pending = false;
+        code.request_focus();
+    }
+    if code.changed() {
+        form.mfa_error = None;
+    }
+    if let Some(problem) = &form.mfa_error {
+        ui.add_space(8.0);
+        error_box(ui, problem, None, p);
+    }
+    let pressed_enter = code.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+
+    ui.add_space(16.0);
+    let ready = !form.busy && !form.mfa_code.trim().is_empty();
+    let label = if form.busy { "驗證中…" } else { "驗證" };
+    let size = vec2(ui.available_width(), CONTROL_HEIGHT);
+    let clicked = button(ui, ButtonKind::Primary, Some(Icon::Check), label, size, ready, None).clicked();
+    if ready && (clicked || pressed_enter) {
+        *action = Action::Login;
+    }
+    ui.add_space(6.0);
+    if button(ui, ButtonKind::Ghost, None, "返回", size, !form.busy, None).clicked() {
+        form.needs_mfa_code = false;
+        form.mfa_code.clear();
+        form.mfa_error = None;
+        form.error = None;
+        form.focus_pending = true;
+    }
     if let Some(error) = &form.error {
         ui.add_space(10.0);
         error_box(ui, error, form.error_detail.as_deref(), p);

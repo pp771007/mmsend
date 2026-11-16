@@ -36,10 +36,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn login(server_input: &str, login_id: &str, password: &str) -> Result<Session, Error> {
+    /// `mfa_code`: for an account with two-step verification on.
+    pub fn login(server_input: &str, login_id: &str, password: &str, mfa_code: Option<&str>) -> Result<Session, Error> {
         let server = api::normalize_server_url(server_input)?;
         let mut client = Client::new(server.clone(), None)?;
-        let (token, user) = client.login(login_id.trim(), password)?;
+        let (token, user) = client.login(login_id.trim(), password, mfa_code)?;
         client.set_token(token.clone());
         let config = Config {
             server_url: server.to_string(),
@@ -48,9 +49,30 @@ impl Session {
             user_id: user.id,
         };
         let secrets = Secrets {
-            password: password.to_owned(),
+            // Renewing would need another code, so the password would only sit there.
+            password: mfa_code.is_none().then(|| password.to_owned()),
             token,
         };
+        Session::save(client, config, secrets)
+    }
+
+    /// With a personal access token instead of a password: for servers that sign in
+    /// through SSO, or anyone who would rather not keep their password on this PC.
+    pub fn login_with_token(server_input: &str, access_token: &str) -> Result<Session, Error> {
+        let server = api::normalize_server_url(server_input)?;
+        let token = access_token.trim().to_owned();
+        let client = Client::new(server.clone(), Some(token.clone()))?;
+        let user = client.me()?;
+        let config = Config {
+            server_url: server.to_string(),
+            login_id: user.username.clone(),
+            username: user.username,
+            user_id: user.id,
+        };
+        Session::save(client, config, Secrets { password: None, token })
+    }
+
+    fn save(client: Client, config: Config, secrets: Secrets) -> Result<Session, Error> {
         store::save_config(&config).map_err(Error::Store)?;
         store::save_secrets(&secrets).map_err(Error::Store)?;
         Ok(Session {
@@ -89,9 +111,11 @@ impl Session {
     }
 
     fn relogin(&mut self) -> Result<(), Error> {
-        let (token, _) = self
-            .client
-            .login(&self.config.login_id, &self.secrets.password)?;
+        // No password kept (access token, two-step verification): only logging in again helps.
+        let Some(password) = &self.secrets.password else {
+            return Err(Error::Api(ApiError::Unauthorized));
+        };
+        let (token, _) = self.client.login(&self.config.login_id, password, None)?;
         self.client.set_token(token.clone());
         self.secrets.token = token;
         store::save_secrets(&self.secrets).map_err(Error::Store)
