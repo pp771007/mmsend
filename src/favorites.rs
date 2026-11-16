@@ -36,6 +36,40 @@ pub fn save(favorites: &[Favorite]) -> Result<(), String> {
     store::save_json(FAVORITES_FILE, &favorites)
 }
 
+/// Applies `change` to the pins as saved right now and returns the result. The
+/// window keeps its own copy, and `mmsend alias set` may have changed the file
+/// since; saving that copy whole would silently undo it.
+pub fn update(change: impl FnOnce(&mut Vec<Favorite>)) -> Result<Vec<Favorite>, String> {
+    let mut favorites = load()?;
+    change(&mut favorites);
+    save(&favorites)?;
+    Ok(favorites)
+}
+
+/// The window's pin button. `unpin` is what the button showed; `list` is the file
+/// as it is now, where the command line may have pinned or given an alias meanwhile.
+pub fn toggle_pin(list: &mut Vec<Favorite>, pin: Favorite, unpin: bool) {
+    match list.iter().position(|f| f.target == pin.target) {
+        // A pin with an alias stays, as the window itself requires clearing it first.
+        Some(index) if unpin && list[index].alias.is_empty() => {
+            list.remove(index);
+        }
+        None if !unpin => list.push(pin),
+        _ => {}
+    }
+}
+
+/// The window's alias field: sets the alias of the pin on `target`, or says why it cannot.
+pub fn set_alias(list: &mut [Favorite], target: &Target, alias: &str) -> Option<String> {
+    if let Some(problem) = alias_problem(alias, list, target) {
+        return Some(problem);
+    }
+    if let Some(pinned) = list.iter_mut().find(|f| &f.target == target) {
+        pinned.alias = alias.to_owned();
+    }
+    None
+}
+
 /// Aliases are matched without regard to case.
 pub fn find_alias<'a>(favorites: &'a [Favorite], alias: &str) -> Option<&'a Favorite> {
     let wanted = alias.to_lowercase();
@@ -91,5 +125,24 @@ mod tests {
         assert!(alias_problem("two words", &favorites, &carol).is_some());
         assert!(alias_problem("-x", &favorites, &carol).is_some());
         assert_eq!(find_alias(&favorites, "值班").map(|f| &f.target), Some(&bob));
+    }
+
+    #[test]
+    fn window_changes_keep_an_alias_set_from_the_command_line() {
+        let bob = Target::User("bob".into());
+        let carol = Target::User("carol".into());
+        // The file after `mmsend alias set 值班 --user bob`, which the open window never saw.
+        let mut file = vec![pin(bob.clone(), "值班")];
+
+        toggle_pin(&mut file, pin(carol.clone(), ""), false);
+        assert_eq!(set_alias(&mut file, &carol, "早班"), None);
+        // The window still showed bob unpinned, so its button meant "pin"; and an
+        // alias holder is never unpinned.
+        toggle_pin(&mut file, pin(bob.clone(), ""), false);
+        toggle_pin(&mut file, pin(bob.clone(), ""), true);
+
+        assert_eq!(find_alias(&file, "值班").map(|f| &f.target), Some(&bob));
+        assert_eq!(find_alias(&file, "早班").map(|f| &f.target), Some(&carol));
+        assert_eq!(file.len(), 2);
     }
 }

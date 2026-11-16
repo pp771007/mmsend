@@ -700,6 +700,7 @@ struct App {
     uninstall: UninstallStep,
     /// `mmsend login`: set on success, then the window closes instead of opening the main view.
     login_only: Option<Arc<AtomicBool>>,
+    was_focused: bool,
 }
 
 /// eframe's (private) storage key for the window's position and size.
@@ -744,6 +745,7 @@ impl App {
             history: None,
             uninstall: UninstallStep::Idle,
             login_only,
+            was_focused: false,
         };
         if app.login_only.is_some() {
             // Shown even when a session exists: logging in again is how to switch
@@ -811,6 +813,30 @@ impl App {
             alias_draft: String::new(),
             alias_error: None,
         }));
+    }
+
+    /// Coming back to the window after `mmsend alias set` ran in a terminal, the pins
+    /// and aliases shown should be the ones scripts now get.
+    fn reload_favorites_on_focus(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
+        let regained = focused && !self.was_focused;
+        self.was_focused = focused;
+        let Screen::Main(view) = &mut self.screen else {
+            return;
+        };
+        if !regained {
+            return;
+        }
+        match favorites::load() {
+            Ok(list) => {
+                view.favorites = list;
+                if let Some(entry) = &view.selected {
+                    view.alias_draft = view.alias_of(&entry.target).unwrap_or_default().to_owned();
+                    view.alias_error = None;
+                }
+            }
+            Err(e) => self.toast = Some(Toast::new(ToastKind::Error, e)),
+        }
     }
 
     fn spawn_load(&self, session: Arc<Mutex<Session>>) {
@@ -1207,6 +1233,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_messages();
+        self.reload_favorites_on_focus(ui.ctx());
         let palette = theme::palette(ui.ctx());
         let action = match &mut self.screen {
             Screen::Login(form) => login_ui(ui, form, &self.logo, palette),
@@ -1943,17 +1970,15 @@ fn composer(
         return;
     }
     if toggle_pin {
-        match pinned {
-            Some(index) => {
-                view.favorites.remove(index);
-            }
-            None => view.favorites.push(entry.pin()),
+        // What the button showed is the intent; the file decides what is there now.
+        let unpin = pinned.is_some();
+        let pin = entry.pin();
+        match favorites::update(|list| favorites::toggle_pin(list, pin, unpin)) {
+            Ok(list) => view.favorites = list,
+            Err(e) => *action = Action::ShowError(e),
         }
-        view.alias_draft.clear();
+        view.alias_draft = view.alias_of(&entry.target).unwrap_or_default().to_owned();
         view.alias_error = None;
-        if let Err(e) = favorites::save(&view.favorites) {
-            *action = Action::ShowError(e);
-        }
     }
     if let Some(index) = view.favorite_index(&entry.target) {
         alias_field(ui, view, index, p, action);
@@ -2064,14 +2089,13 @@ fn alias_field(ui: &mut egui::Ui, view: &mut MainView, index: usize, p: &Palette
         if field.changed() {
             let alias = view.alias_draft.trim().to_owned();
             let target = view.favorites[index].target.clone();
-            view.alias_error = favorites::alias_problem(&alias, &view.favorites, &target);
-            if view.alias_error.is_none() && view.favorites[index].alias != alias {
-                view.favorites[index].alias = alias;
-                view.copied_at = None;
-                if let Err(e) = favorites::save(&view.favorites) {
-                    *action = Action::ShowError(e);
-                }
+            let mut problem = None;
+            match favorites::update(|list| problem = favorites::set_alias(list, &target, &alias)) {
+                Ok(list) => view.favorites = list,
+                Err(e) => *action = Action::ShowError(e),
             }
+            view.alias_error = problem;
+            view.copied_at = None;
         }
         if let Some(problem) = &view.alias_error {
             ui.add(Label::new(RichText::new(problem).size(12.5).color(p.danger)).wrap());
