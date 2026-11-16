@@ -62,8 +62,9 @@ impl std::fmt::Display for Version {
 pub enum InstallState {
     NotInstalled,
     Installed,
-    /// The installed copy is an older version, or another build of this version.
-    Outdated,
+    /// The installed copy is another exe than this one: an older version, or another
+    /// build of this version. Its version, when it can be read.
+    Different(Option<Version>),
     /// The installed copy is newer than this exe (an old download was opened):
     /// commands already work, and replacing it would be a downgrade.
     Newer(Version),
@@ -97,7 +98,7 @@ pub fn state() -> InstallState {
         Ok(current) if same_file_contents(&current, &installed) => InstallState::Installed,
         Ok(_) => match file_version(&installed) {
             Some(version) if version > Version::current() => InstallState::Newer(version),
-            _ => InstallState::Outdated,
+            version => InstallState::Different(version),
         },
         Err(_) => InstallState::Installed,
     }

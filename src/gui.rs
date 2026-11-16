@@ -2546,7 +2546,9 @@ fn install_banner(ui: &mut egui::Ui, installation: &Installation, p: &Palette, a
         }
         return;
     }
-    let button_label = match installation.state {
+    // 更新 means a download from GitHub (above); here it is this very file going in,
+    // so the banner says what is installed now and offers to install this version.
+    let (installed, button_label) = match installation.state {
         InstallState::Installed => return,
         InstallState::Newer(installed) => {
             ui.add_space(10.0);
@@ -2554,14 +2556,22 @@ fn install_banner(ui: &mut egui::Ui, installation: &Installation, p: &Palette, a
             notice(ui, Icon::Download, &text, p.accent, p.accent_soft);
             return;
         }
-        InstallState::Outdated => format!("更新至 v{}", Version::current()),
-        InstallState::NotInstalled => "安裝".to_owned(),
+        InstallState::Different(installed) => (Some(installed), format!("安裝 v{}", Version::current())),
+        InstallState::NotInstalled => (None, "安裝".to_owned()),
     };
     let label = if installation.installing { "安裝中…" } else { &button_label };
     let tip = format!("{INSTALL_LOCATION}，並新增開始功能表「{}」", crate::APP_NAME);
-    let clicked = banner(ui, p, Icon::Download, label, !installation.installing, Some(&tip), |ui| {
-        ui.label(RichText::new("安裝後指令只需輸入").color(p.text));
-        code_chip(ui, install::COMMAND_NAME, p);
+    let clicked = banner(ui, p, Icon::Download, label, !installation.installing, Some(&tip), |ui| match installed {
+        Some(Some(version)) if version != Version::current() => {
+            ui.label(RichText::new(format!("電腦上安裝的是 v{version}")).color(p.text));
+        }
+        Some(_) => {
+            ui.label(RichText::new("電腦上安裝的是另一份程式").color(p.text));
+        }
+        None => {
+            ui.label(RichText::new("安裝後指令只需輸入").color(p.text));
+            code_chip(ui, install::COMMAND_NAME, p);
+        }
     });
     if clicked {
         *action = Action::Install;

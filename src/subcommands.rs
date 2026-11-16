@@ -133,7 +133,7 @@ pub fn install() -> Result<String, Failure> {
     match install::state() {
         InstallState::Installed => return Ok(format!("已安裝：{exe}")),
         InstallState::Newer(version) => return Ok(format!("已安裝較新的版本 {version}：{exe}")),
-        InstallState::NotInstalled | InstallState::Outdated => {}
+        InstallState::NotInstalled | InstallState::Different(_) => {}
     }
     install::install().map_err(|e| Failure::new(EXIT_OTHER, e))?;
     Ok(format!(
@@ -177,10 +177,14 @@ pub fn login() -> Result<String, Failure> {
 
 /// What an agent checks first. Asks the server, so "logged in" means sending works.
 pub fn status() -> Result<String, Failure> {
+    let current = Version::current();
     let installed = match install::state() {
-        InstallState::Installed | InstallState::Newer(_) => "已安裝，可直接輸入 mmsend",
-        InstallState::Outdated => "已安裝其他版本，執行 mmsend install 改裝這一版",
-        InstallState::NotInstalled => "未安裝，執行 mmsend install 後可直接輸入 mmsend",
+        InstallState::Installed | InstallState::Newer(_) => "已安裝，可直接輸入 mmsend".to_owned(),
+        InstallState::Different(Some(version)) if version != current => {
+            format!("電腦上安裝的是 v{version}，執行 mmsend install 安裝這一版（v{current}）")
+        }
+        InstallState::Different(_) => "電腦上安裝的是另一份程式，執行 mmsend install 安裝這一版".to_owned(),
+        InstallState::NotInstalled => "未安裝，執行 mmsend install 後可直接輸入 mmsend".to_owned(),
     };
     let mut head = format!("版本 {}\n{installed}", Version::current());
     // Not knowing is no failure of status: a line is left out, the exit code is not affected.
