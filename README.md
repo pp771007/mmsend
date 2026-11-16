@@ -97,6 +97,18 @@ cargo run              :: 開啟設定視窗
 cargo run -- --help    :: 指令說明
 ```
 
+開發版（`cargo run` / `cargo build`）是獨立的「Mattermost 指令傳訊（開發版）」：設定、登入、
+傳送紀錄存在 `%APPDATA%\mmsend-dev`，安裝為 `mmsend-dev` 指令，不會動到正式版的資料。
+
+測試用的 Mattermost（需要 Docker）：
+
+```bat
+python dev/test-server.py up      :: 啟動並讓開發版登入測試帳號 tester
+python dev/test-server.py down    :: 停止
+```
+
+內含 alice 等幾位同事、公開與私人頻道，以及一個 tester 沒加入的頻道。
+
 發版：修改 `Cargo.toml` 的 `version`，commit 後推送同版號的 tag（例如 `v0.2.0`），
 GitHub Actions 會編譯並將 `mmsend.exe` 發佈至 Releases。
 
