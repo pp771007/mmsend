@@ -38,6 +38,11 @@ jobs:
           # LF line ending, so `sha256sum -c` on Linux or Git Bash can read the filename.
           Set-Content -NoNewline -Encoding ascii -Path target/release/mmsend.exe.sha256 -Value "$hash  mmsend.exe`n"
 
+      - name: Checksum file verifies with sha256sum
+        shell: bash
+        working-directory: target/release
+        run: sha256sum -c mmsend.exe.sha256
+
       - uses: softprops/action-gh-release@v3
         with:
           files: |
