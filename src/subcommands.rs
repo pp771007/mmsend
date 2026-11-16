@@ -179,7 +179,13 @@ pub fn login() -> Result<String, Failure> {
 pub fn status() -> Result<String, Failure> {
     let current = Version::current();
     let installed = match install::state() {
-        InstallState::Installed | InstallState::Newer(_) => "已安裝，可直接輸入 mmsend".to_owned(),
+        InstallState::Installed | InstallState::Newer(_) if install::on_current_path() => {
+            "已安裝，可直接輸入 mmsend".to_owned()
+        }
+        InstallState::Installed | InstallState::Newer(_) => {
+            let exe = install::installed_exe().map(|path| path.display().to_string()).unwrap_or_default();
+            format!("已安裝；這個視窗還不認得 mmsend 指令，請用完整路徑：{exe}")
+        }
         InstallState::Different(Some(version)) if version != current => {
             format!("電腦上安裝的是 v{version}，執行 mmsend install 安裝這一版（v{current}）")
         }

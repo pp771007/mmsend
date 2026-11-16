@@ -50,6 +50,8 @@ const PREVIEW_LINES: usize = 20;
 const PREVIEW_MAX_CHARS: usize = 2000;
 /// How much of the message the send log keeps.
 const SUMMARY_CHARS: usize = 60;
+/// How much of the message a dry run prints before saying how many lines remain.
+const DRY_RUN_LINES: usize = 10;
 
 const STDIN_MARKER: &str = "-";
 /// What cmd users type out of habit; it would otherwise be sent as a message.
@@ -86,6 +88,12 @@ const EXAMPLES: &str = "\
   mmsend --group alice,bob \"會議改到三點\"
   mmsend --user alice --attach 日報.xlsx \"今日報表\"
   ipconfig | mmsend --user alice --code";
+
+/// Without it, multi-line messages get written as plain run-on lines for fear of
+/// stray formatting.
+const MARKDOWN_NOTE: &str = "\
+訊息以 Mattermost 的 Markdown 顯示：多項內容用「- 」清單、段落之間空一行、重點用 **粗體**；
+加 --code 則整段顯示為程式碼區塊，適合指令輸出。";
 
 #[derive(Parser)]
 #[command(
@@ -160,7 +168,7 @@ fn command() -> clap::Command {
         .map(|(code, meaning)| format!("\n  {code}  {meaning}"))
         .collect();
     Args::command().after_help(format!(
-        "{EXAMPLES}\n\n結束代碼（批次檔可用 if errorlevel 判斷）：{exit_codes}"
+        "{EXAMPLES}\n\n{MARKDOWN_NOTE}\n\n結束代碼（批次檔可用 if errorlevel 判斷）：{exit_codes}"
     ))
 }
 
@@ -298,16 +306,26 @@ fn dry_run(args: &Args) -> Result<String, Failure> {
         "試跑，未傳送".to_owned(),
         format!("收件對象：{}", recipient.label),
     ];
-    let text = summarize_text(&outgoing.message);
-    if !text.is_empty() {
-        let line_count = outgoing.message.lines().count();
-        lines.push(format!("內容：{text}（共 {line_count} 行）"));
+    if !outgoing.message.is_empty() {
+        lines.push("內容：".to_owned());
+        lines.extend(preview_lines(&outgoing.message));
     }
     if !outgoing.files.is_empty() {
         let names: Vec<&str> = outgoing.files.iter().map(|file| file.name.as_str()).collect();
         lines.push(format!("附件：{}", names.join("、")));
     }
     Ok(lines.join("\n"))
+}
+
+/// The post as it will go out, so whoever confirms reads the text itself rather than
+/// someone's account of it; past DRY_RUN_LINES, how many more lines there are.
+fn preview_lines(message: &str) -> Vec<String> {
+    let all: Vec<&str> = message.lines().collect();
+    let mut shown: Vec<String> = all.iter().take(DRY_RUN_LINES).map(|line| format!("  {line}")).collect();
+    if all.len() > DRY_RUN_LINES {
+        shown.push(format!("  …還有 {} 行", all.len() - DRY_RUN_LINES));
+    }
+    shown
 }
 
 fn log(record: &SendRecord) {
@@ -584,6 +602,17 @@ mod tests {
         assert!(group("a,b").is_ok());
         assert!(group("a,b,c,d,e,f,g").is_ok());
         assert!(group("a,b,c,d,e,f,g,h").is_err());
+    }
+
+    #[test]
+    fn dry_run_shows_the_text_itself_up_to_a_limit() {
+        let short = "第一行\n第二行\n第三行";
+        assert_eq!(preview_lines(short), vec!["  第一行", "  第二行", "  第三行"]);
+        let long: String = (1..=13).map(|n| format!("第 {n} 行\n")).collect();
+        let shown = preview_lines(&long);
+        assert_eq!(shown.len(), DRY_RUN_LINES + 1);
+        assert_eq!(shown[DRY_RUN_LINES - 1], "  第 10 行");
+        assert_eq!(shown[DRY_RUN_LINES], "  …還有 3 行");
     }
 
     #[test]

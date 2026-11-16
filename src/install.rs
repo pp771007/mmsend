@@ -91,6 +91,16 @@ fn install_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("Programs").join(COMMAND_NAME))
 }
 
+/// Whether this process's PATH reaches the install folder. Installing changes the
+/// user's PATH for shells opened afterwards only; one already open (an agent's
+/// terminal, say) still cannot run a bare `mmsend`.
+pub fn on_current_path() -> bool {
+    let (Some(dir), Ok(path)) = (install_dir(), std::env::var("PATH")) else {
+        return false;
+    };
+    path_contains(&path, &dir)
+}
+
 /// Where `install` puts the exe: the full path works before a new shell picks up PATH.
 pub fn installed_exe() -> Option<PathBuf> {
     install_dir().map(|dir| dir.join(EXE_NAME))
