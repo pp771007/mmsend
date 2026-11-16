@@ -1,8 +1,12 @@
 """A local Mattermost to try debug builds against, so testing never touches a real account.
 
     python dev/test-server.py up      start it, add the test accounts and channels, log the debug build in
+    python dev/test-server.py totp    print carol's current two-step verification code
     python dev/test-server.py down    stop it (it keeps its data)
     python dev/test-server.py reset   delete it; the next `up` starts from nothing
+
+Besides passwords: dave has a personal access token (printed by `up`), carol has
+two-step verification on (codes from `totp`).
 
 Runs mattermost/mattermost-preview in Docker, reachable only from this PC. `up` can be
 run again at any time: what already exists is kept.
@@ -11,10 +15,14 @@ Debug builds (`cargo run`) use their own profile, `mmsend-dev`, which `up` logs 
 `tester`. Release builds never see any of this.
 """
 
+import base64
 import ctypes
 import ctypes.wintypes as wt
+import hashlib
+import hmac
 import json
 import os
+import struct
 import subprocess
 import sys
 import time
@@ -43,6 +51,13 @@ PEOPLE = {
     "dave": ("林", "志豪"),
 }
 TEAM = ("dev", "開發部")
+TOKEN_USER = "dave"
+MFA_USER = "carol"
+# The token and the verification secret can only be read when created, so `up` keeps
+# them beside the debug build's settings.
+STATE_FILE = os.path.join(os.environ["APPDATA"], DEV_PROFILE, "test-server.json")
+TOTP_STEP_SECONDS = 30
+TOTP_DIGITS = 6
 # name: (display name, type, whether tester is a member). One public channel tester has
 # not joined: it can be found, yet refuses a post, which a dry run has to catch.
 CHANNELS = {
@@ -99,6 +114,9 @@ def login(username):
 def ensure_user(username, admin_token=None):
     last, first = PEOPLE[username]
     try:
+        # Looked up, not logged in as: a password alone fails once two-step verification is on.
+        if admin_token:
+            return api("GET", f"/users/username/{username}", token=admin_token)[0]
         return login(username)[0]
     except urllib.error.HTTPError:
         pass
@@ -149,7 +167,63 @@ def seed():
                 api("DELETE", f"/channels/{channel['id']}/members/{me['id']}", token=token)
             except urllib.error.HTTPError:
                 pass  # already not a member
-    return me, token
+    api("PUT", "/config/patch", {"ServiceSettings": {
+        "EnableUserAccessTokens": True, "EnableMultifactorAuthentication": True}}, token)
+    state = load_state()
+    state["token"] = ensure_access_token(token, users[TOKEN_USER], state.get("token"))
+    state["mfa_secret"] = ensure_mfa(users[MFA_USER], state.get("mfa_secret"))
+    save_state(state)
+    return me, token, state
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except OSError:
+        return {}
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def ensure_access_token(admin_token, user, saved):
+    if saved:
+        try:
+            api("GET", "/users/me", token=saved)
+            return saved
+        except urllib.error.HTTPError:
+            pass
+    created, _ = api("POST", f"/users/{user['id']}/tokens", {"description": "mmsend test"}, admin_token)
+    print(f"  建立 {user['username']} 的個人存取權杖")
+    return created["token"]
+
+
+def totp(secret):
+    key = base64.b32decode(secret.upper() + "=" * (-len(secret) % 8))
+    counter = struct.pack(">Q", int(time.time()) // TOTP_STEP_SECONDS)
+    digest = hmac.new(key, counter, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    number = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(number % 10**TOTP_DIGITS).zfill(TOTP_DIGITS)
+
+
+def ensure_mfa(user, saved):
+    try:
+        login(user["username"])
+    except urllib.error.HTTPError:
+        if saved:
+            return saved  # already on: a password alone is refused
+        raise
+    _, token = login(user["username"])
+    generated, _ = api("POST", f"/users/{user['id']}/mfa/generate", token=token)
+    secret = generated["secret"]
+    api("PUT", f"/users/{user['id']}/mfa", {"activate": True, "code": totp(secret)}, token)
+    print(f"  開啟 {user['username']} 的兩步驟驗證")
+    return secret
 
 
 class CREDENTIALW(ctypes.Structure):
@@ -188,9 +262,13 @@ def main():
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "up":
         start()
-        me, token = seed()
+        me, token, state = seed()
         log_in_debug_build(me, token)
         print(f"完成：{SERVER}（網頁也能開），開發版已登入為 {ME}，密碼 {PASSWORD}")
+        print(f"{TOKEN_USER} 的個人存取權杖：{state['token']}")
+        print(f"{MFA_USER} 的驗證碼：python dev/test-server.py totp")
+    elif command == "totp":
+        print(totp(load_state()["mfa_secret"]))
     elif command == "down":
         docker("stop", CONTAINER, check=False)
         print("已停止")
