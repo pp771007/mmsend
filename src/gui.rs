@@ -67,6 +67,10 @@ const ALIAS_TAG_GAP: f32 = 8.0;
 /// Fits the icon and 已釘選.
 const PIN_BUTTON_WIDTH: f32 = 92.0;
 const RECIPIENT_CARD_PADDING: i8 = 10;
+/// What the list keeps below the header however tall the composer grows: search,
+/// filter and a row. Small, because the list scrolls anyway while the composer's
+/// copy button at the bottom should stay in view at the default window size.
+const MIN_DIRECTORY_HEIGHT: f32 = 190.0;
 /// Between the recipient card and the message: what is kept versus what is sent now.
 const RECIPIENT_MESSAGE_GAP: f32 = 12.0;
 /// Shorter than the other fields: the recipient card should not squeeze the list.
@@ -81,8 +85,8 @@ const TOAST_GAP: f32 = 14.0;
 const TOAST_SLIDE: f32 = 10.0;
 const TOAST_MAX_WIDTH: f32 = 380.0;
 const INSTALL_LOCATION: &str = "安裝至 %LOCALAPPDATA%\\Programs\\mmsend";
-const INSTALL_TILE_SIZE: f32 = 38.0;
-const BENEFIT_ICON_SIZE: f32 = 15.0;
+const BANNER_BUTTON_WIDTH: f32 = 124.0;
+const BANNER_BUTTON_HEIGHT: f32 = 30.0;
 const CODE_CHIP_FONT_SIZE: f32 = 12.5;
 const SEND_BUTTON_SIZE: f32 = 30.0;
 /// Distance from the message field's right edge to the send button's centre.
@@ -1719,20 +1723,34 @@ fn main_ui(ui: &mut egui::Ui, view: &mut MainView, installation: &Installation, 
 
     egui::Panel::top("header")
         .frame(Frame::default().fill(p.surface).inner_margin(Margin::symmetric(PAGE_MARGIN, 12)))
-        .show(ui, |ui| header(ui, view, installation.state != InstallState::NotInstalled, p, &mut action));
+        .show(ui, |ui| {
+            header(ui, view, installation.state != InstallState::NotInstalled, p, &mut action);
+            install_banner(ui, installation, p, &mut action);
+        });
 
+    // The composer grows with its content; past this it scrolls, so the list above
+    // never shrinks out of sight.
+    let composer_max_height = (ui.available_height() - MIN_DIRECTORY_HEIGHT - 2.0 * f32::from(PAGE_MARGIN)).max(0.0);
     let composer = egui::Panel::bottom("composer")
         .frame(Frame::default().fill(p.surface).inner_margin(Margin::same(PAGE_MARGIN)))
-        .show(ui, |ui| match view.selected.clone() {
-            Some(entry) => composer(ui, view, &entry, installation, p, &mut action),
-            None => {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(4.0);
-                    paint_icon(ui, Icon::Chat, 26.0, p.text_weak, p.surface);
-                    ui.label(RichText::new("請選擇人員或頻道").color(p.text_weak));
-                    ui.add_space(4.0);
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("composer")
+                .max_height(composer_max_height)
+                // Otherwise content taller than the panel's last height is squeezed
+                // into egui's default 64 px instead of growing the panel.
+                .min_scrolled_height(composer_max_height)
+                .show(ui, |ui| match view.selected.clone() {
+                    Some(entry) => composer(ui, view, &entry, installation, p, &mut action),
+                    None => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(4.0);
+                            paint_icon(ui, Icon::Chat, 26.0, p.text_weak, p.surface);
+                            ui.label(RichText::new("請選擇人員或頻道").color(p.text_weak));
+                            ui.add_space(4.0);
+                        });
+                    }
                 });
-            }
         });
 
     view.composer_height = composer.response.rect.height();
@@ -1982,6 +2000,21 @@ fn composer(
     let pinned = view.favorite_index(&entry.target);
     // Unpinning would silently break every script that uses the alias.
     let has_alias = view.alias_of(&entry.target).is_some();
+    // The close button heads the whole panel, outside the card, so it reads as
+    // closing all of it rather than the card.
+    ui.allocate_ui_with_layout(
+        vec2(ui.available_width(), ICON_BUTTON_SIZE),
+        Layout::right_to_left(Align::Center),
+        |ui| {
+            if icon_button(ui, Icon::Close, "關閉（Esc）").clicked() {
+                close = true;
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.label(RichText::new("傳送給").color(p.text_weak));
+            });
+        },
+    );
+    ui.add_space(4.0);
     // Who, and what is kept about them (pin, alias), boxed apart from this one message.
     Frame::default()
         .fill(p.background)
@@ -1993,9 +2026,6 @@ fn composer(
                 vec2(ui.available_width(), ICON_BUTTON_SIZE),
                 Layout::right_to_left(Align::Center),
                 |ui| {
-                    if icon_button(ui, Icon::Close, "關閉（Esc）").clicked() {
-                        close = true;
-                    }
                     let (icon, label, tip) = match (pinned, has_alias) {
                         (None, _) => (Icon::Pin, "釘選", "釘選到清單最上方"),
                         (Some(_), false) => (Icon::Pinned, "已釘選", "取消釘選"),
@@ -2006,7 +2036,6 @@ fn composer(
                         toggle_pin = true;
                     }
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        ui.label(RichText::new("傳送給").color(p.text_weak));
                         let (rect, _) = ui.allocate_exact_size(Vec2::splat(SMALL_AVATAR_SIZE), Sense::hover());
                         paint_avatar(ui, &mut view.avatars, rect, entry, p);
                         ui.add(Label::new(RichText::new(&entry.title).strong().color(p.text)).truncate());
@@ -2068,16 +2097,7 @@ fn composer(
     }
 
     ui.add_space(6.0);
-    if installation.state.commands_work() {
-        if let InstallState::Newer(installed) = installation.state {
-            let text = format!("已安裝較新的 v{installed}，請從開始功能表開啟");
-            notice(ui, Icon::Download, &text, p.accent, p.accent_soft);
-            ui.add_space(4.0);
-        }
-        command_section(ui, view, entry, copied, p);
-    } else {
-        install_card(ui, installation, p, action);
-    }
+    command_section(ui, view, entry, copied, installation.state.commands_work(), p);
     if copied || sent {
         ui.ctx().request_repaint_after(FEEDBACK_DURATION);
     }
@@ -2150,7 +2170,9 @@ fn alias_field(ui: &mut egui::Ui, view: &mut MainView, entry: &Entry, p: &Palett
     });
 }
 
-fn command_section(ui: &mut egui::Ui, view: &mut MainView, entry: &Entry, copied: bool, p: &Palette) {
+/// `installed`: the bare `mmsend` in the command only works once installed, so
+/// copying waits for the banner's install button.
+fn command_section(ui: &mut egui::Ui, view: &mut MainView, entry: &Entry, copied: bool, installed: bool, p: &Palette) {
     if segmented(ui, &mut view.template, &TEMPLATE_CHOICES, p) {
         view.copied_at = None;
     }
@@ -2173,65 +2195,57 @@ fn command_section(ui: &mut egui::Ui, view: &mut MainView, entry: &Entry, copied
         notice(ui, Icon::Warning, "訊息含有雙引號或換行，請改用「文字檔」", p.danger, p.danger_soft);
     }
     ui.add_space(4.0);
-    let (icon, label) = if copied { (Icon::Check, "已複製") } else { (Icon::Copy, "複製指令") };
+    let (icon, label) = match (installed, copied) {
+        (false, _) => (Icon::Copy, "安裝後即可複製"),
+        (true, true) => (Icon::Check, "已複製"),
+        (true, false) => (Icon::Copy, "複製指令"),
+    };
     let size = vec2(ui.available_width(), CONTROL_HEIGHT);
-    if button(ui, ButtonKind::Primary, Some(icon), label, size, !blocked, None).clicked() {
+    if button(ui, ButtonKind::Primary, Some(icon), label, size, installed && !blocked, None).clicked() {
         ui.ctx().copy_text(command);
         view.copied_at = Some(Instant::now());
     }
 }
 
-/// Stands in for the command until the exe is installed, which is what makes the
-/// short `mmsend` command work.
-fn install_card(ui: &mut egui::Ui, installation: &Installation, p: &Palette, action: &mut Action) {
-    let (title, button_label) = match installation.state {
-        InstallState::Outdated => ("更新後即可複製指令", format!("更新至 v{}", Version::current())),
-        _ => ("安裝後即可複製指令", "安裝".to_owned()),
+/// Installing is about the app, not the recipient, so it lives under the header as
+/// one line rather than in the composer, where it squeezed the list.
+fn install_banner(ui: &mut egui::Ui, installation: &Installation, p: &Palette, action: &mut Action) {
+    let button_label = match installation.state {
+        InstallState::Installed => return,
+        InstallState::Newer(installed) => {
+            ui.add_space(10.0);
+            let text = format!("已安裝較新的 v{installed}，請從開始功能表開啟");
+            notice(ui, Icon::Download, &text, p.accent, p.accent_soft);
+            return;
+        }
+        InstallState::Outdated => format!("更新至 v{}", Version::current()),
+        InstallState::NotInstalled => "安裝".to_owned(),
     };
+    ui.add_space(10.0);
     Frame::default()
         .fill(p.accent_soft)
-        .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.25)))
-        .corner_radius(CornerRadius::same(CARD_RADIUS))
-        .inner_margin(Margin::same(16))
+        .corner_radius(CornerRadius::same(RADIUS))
+        .inner_margin(Margin::symmetric(12, 6))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let (tile, _) = ui.allocate_exact_size(Vec2::splat(INSTALL_TILE_SIZE), Sense::hover());
-                ui.painter().rect_filled(tile, CornerRadius::same(RADIUS), p.accent);
-                icons::paint(ui.painter(), Icon::Download, tile.shrink(INSTALL_TILE_SIZE * 0.26), p.on_accent, p.accent);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(RichText::new(title).size(16.0).strong().color(p.text));
-                    ui.label(RichText::new(INSTALL_LOCATION).small().color(p.text_weak));
-                });
-            });
-            ui.add_space(10.0);
-            benefit(ui, p, |ui| {
-                ui.label(RichText::new("指令只需輸入").color(p.text));
-                code_chip(ui, install::COMMAND_NAME, p);
-            });
-            benefit(ui, p, |ui| {
-                ui.label(RichText::new("支援 cmd、PowerShell 與批次檔").color(p.text));
-            });
-            benefit(ui, p, |ui| {
-                ui.label(RichText::new(format!("開始功能表新增「{}」", crate::APP_NAME)).color(p.text));
-            });
-            ui.add_space(12.0);
-            let label = if installation.installing { "安裝中…" } else { &button_label };
-            let size = vec2(ui.available_width(), CONTROL_HEIGHT);
-            let enabled = !installation.installing;
-            if button(ui, ButtonKind::Primary, Some(Icon::Download), label, size, enabled, None).clicked() {
-                *action = Action::Install;
-            }
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), BANNER_BUTTON_HEIGHT),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    let label = if installation.installing { "安裝中…" } else { &button_label };
+                    let tip = format!("{INSTALL_LOCATION}，並新增開始功能表「{}」", crate::APP_NAME);
+                    let size = vec2(BANNER_BUTTON_WIDTH, BANNER_BUTTON_HEIGHT);
+                    let enabled = !installation.installing;
+                    if button(ui, ButtonKind::Primary, Some(Icon::Download), label, size, enabled, Some(&tip)).clicked() {
+                        *action = Action::Install;
+                    }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(RichText::new("安裝後指令只需輸入").color(p.text));
+                        code_chip(ui, install::COMMAND_NAME, p);
+                    });
+                },
+            );
         });
-}
-
-fn benefit(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        paint_icon(ui, Icon::Check, BENEFIT_ICON_SIZE, p.accent, p.accent_soft);
-        add(ui);
-    });
 }
 
 fn code_chip(ui: &mut egui::Ui, text: &str, p: &Palette) {
