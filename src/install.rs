@@ -14,8 +14,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
 
-pub const COMMAND_NAME: &str = "mmsend";
-const EXE_NAME: &str = "mmsend.exe";
+/// Also names the settings folder and the credential entry (`store`). A debug build
+/// is `mmsend-dev` throughout: its own settings, login, install folder and command,
+/// so trying things never touches the released copy someone uses, and the two
+/// commands on PATH cannot shadow each other.
+pub const COMMAND_NAME: &str = if cfg!(debug_assertions) { "mmsend-dev" } else { "mmsend" };
+const EXE_NAME: &str = if cfg!(debug_assertions) { "mmsend-dev.exe" } else { "mmsend.exe" };
 const ENVIRONMENT_KEY: &str = "Environment";
 const PATH_VALUE: &str = "Path";
 const BROADCAST_TIMEOUT_MS: u32 = 5000;

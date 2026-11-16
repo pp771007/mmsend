@@ -14,26 +14,26 @@ use windows_sys::Win32::Security::Credentials::{
     CredWriteW,
 };
 
-/// Also the name of the entry under Control Panel > Credential Manager > Windows
-/// Credentials.
-const APP_NAME: &str = "mmsend";
+use crate::install::COMMAND_NAME;
+
 const CONFIG_FILE: &str = "config.json";
 const SEND_LOG_FILE: &str = "sends.jsonl";
 /// Weeks of a few scheduled jobs. The file is cut back to this many lines once it
 /// has grown to twice as many, so most runs only append.
 const SEND_LOG_KEEP: usize = 300;
-/// Debug builds only: run under a separate profile (folder and credential entry
-/// `mmsend-<name>`), so trying things against a test server on the same PC never
-/// touches the real login.
+/// Debug builds only: one more profile (`mmsend-dev-<name>`) beside the debug
+/// build's own, for a clean start such as never having logged in.
 #[cfg(debug_assertions)]
 const DEV_PROFILE_VARIABLE: &str = "MMSEND_DEV_PROFILE";
 
+/// The settings folder and the entry under Control Panel > Credential Manager >
+/// Windows Credentials: `mmsend`, or `mmsend-dev` for a debug build.
 fn profile_name() -> String {
     #[cfg(debug_assertions)]
     if let Ok(profile) = std::env::var(DEV_PROFILE_VARIABLE) {
-        return format!("{APP_NAME}-{profile}");
+        return format!("{COMMAND_NAME}-{profile}");
     }
-    APP_NAME.to_owned()
+    COMMAND_NAME.to_owned()
 }
 
 /// `%APPDATA%\mmsend`: settings and anything else kept between runs.
@@ -200,7 +200,7 @@ pub fn load_secrets() -> Result<Option<Secrets>, String> {
 pub fn save_secrets(secrets: &Secrets) -> Result<(), String> {
     let mut blob = serde_json::to_vec(secrets).map_err(|e| e.to_string())?;
     let mut target = wide(&profile_name());
-    let mut user_name = wide(APP_NAME);
+    let mut user_name = wide(COMMAND_NAME);
     // SAFETY: an all-zero CREDENTIALW is a valid "no optional fields" value; every
     // pointer we set points into buffers that live until CredWriteW returns.
     let ok = unsafe {

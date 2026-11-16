@@ -16,8 +16,8 @@ mod update;
 use std::process::ExitCode;
 
 /// Product name for people (window title, Start menu, messages); `mmsend` is only
-/// the command.
-pub const APP_NAME: &str = "Mattermost 指令傳訊";
+/// the command. A debug build says so, so it is never mistaken for the installed one.
+pub const APP_NAME: &str = if cfg!(debug_assertions) { "Mattermost 指令傳訊（開發版）" } else { "Mattermost 指令傳訊" };
 
 fn main() -> ExitCode {
     if std::env::args_os().len() > 1 {
