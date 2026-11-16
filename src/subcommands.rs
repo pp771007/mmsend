@@ -31,7 +31,7 @@ pub const DELETE: &str = "delete";
 #[command(
     name = "mmsend delete",
     about = "刪除自己傳的訊息。對方若已收到通知（手機、桌面、Email），通知無法收回。",
-    override_usage = "mmsend delete <訊息ID>\n  mmsend delete --last",
+    override_usage = "mmsend delete <訊息ID>\n  mmsend delete --last [--dry-run]",
     help_template = HELP_TEMPLATE,
     no_binary_name = true,
     disable_help_flag = true
@@ -45,6 +45,10 @@ struct DeleteArgs {
     #[arg(long)]
     last: bool,
 
+    /// 試跑：顯示將刪除的訊息，不刪除
+    #[arg(long)]
+    dry_run: bool,
+
     /// 顯示說明
     #[arg(short = 'h', long, action = ArgAction::Help)]
     help: Option<bool>,
@@ -55,14 +59,19 @@ pub fn delete() -> Result<String, Failure> {
         Ok(args) => args,
         Err(help) => return Ok(help),
     };
-    let post_id = match args.post_id {
-        Some(id) => id.trim().to_owned(),
+    // `sent`: when and to whom, known for --last; a scheduled job may have sent
+    // the newest message, which is what the dry run lets someone notice.
+    let (post_id, sent) = match args.post_id {
+        Some(id) => (id.trim().to_owned(), None),
         // Always the newest send: run twice, the second finds it already deleted
         // instead of reaching back to an older message.
         None => store::load_send_records()
             .map_err(|e| Failure::new(EXIT_OTHER, e))?
             .into_iter()
-            .find_map(|record| record.post_id.filter(|_| record.ok))
+            .find_map(|record| {
+                let sent = format!("{} 傳給 {}", record.time, record.target);
+                record.post_id.filter(|_| record.ok).map(|id| (id, Some(sent)))
+            })
             .ok_or_else(|| Failure::new(EXIT_TARGET_NOT_FOUND, "傳送紀錄中沒有可刪除的訊息"))?,
     };
     let mut session = Session::load().map_err(login_failure)?;
@@ -72,6 +81,12 @@ pub fn delete() -> Result<String, Failure> {
         e => login_failure(e),
     })?;
     refuse_unless_own(&post, &session.config.user_id)?;
+    let summary = summarize_text(&post.message);
+    let what = if summary.is_empty() { format!(" {post_id}") } else { format!("「{summary}」") };
+    let when = sent.map(|sent| format!("（{sent}）")).unwrap_or_default();
+    if args.dry_run {
+        return Ok(format!("試跑，未刪除\n將刪除訊息{what}{when}"));
+    }
     match with_retries(|| session.call(|c| c.delete_post(&post_id))) {
         // A retry after a lost response finds it gone: that is the goal reached.
         Ok(()) | Err(Error::Api(ApiError::NotFound)) => {}
@@ -83,9 +98,7 @@ pub fn delete() -> Result<String, Failure> {
         }
         Err(e) => return Err(login_failure(e)),
     }
-    let summary = summarize_text(&post.message);
-    let what = if summary.is_empty() { format!(" {post_id}") } else { format!("「{summary}」") };
-    Ok(format!("已刪除訊息{what}"))
+    Ok(format!("已刪除訊息{what}{when}"))
 }
 
 /// The server lets an admin delete anyone's post; this command only ever takes back

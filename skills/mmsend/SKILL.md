@@ -15,10 +15,10 @@ mmsend status
 ```
 
 - 找不到指令 → 試完整路徑 `"$env:LOCALAPPDATA\Programs\mmsend\mmsend.exe" status`；也沒有就做「下載」。
-- 回「請指定收件對象」→ 裝的是沒有 `status` 的舊版，做「下載」換新版。
+- 任何 `mmsend <指令>` 回「請指定收件對象」→ 裝的是還沒有那個指令的舊版，做「下載」換新版。
 - 第二行是「未安裝」或「已安裝其他版本」→ 執行 `mmsend install`。
 
-**下載**（PowerShell；`$exe` 之後就用它）：
+**下載**（PowerShell）：
 
 ```powershell
 $ProgressPreference = 'SilentlyContinue'
@@ -38,7 +38,9 @@ if ((Get-FileHash "$dir\mmsend.exe" -Algorithm SHA256).Hash -ne $expected) { thr
 
 ## 2. 登入
 
-`status` 結束代碼 3（尚未登入）或 4（密碼已變更）→ 先告訴使用者「畫面上會跳出 Mattermost 登入視窗，請登入」，再執行：
+`status` 結束代碼 3（尚未登入）或 4（密碼已變更）時，登入視窗只會出現在這台電腦的螢幕上。
+使用者不在電腦前（例如從 Telegram 或手機下指令）→ 告訴他回到電腦前才能登入，先不執行。
+在電腦前 → 先告訴他「畫面上會跳出 Mattermost 登入視窗，請登入」，再執行：
 
 ```powershell
 mmsend login
@@ -73,7 +75,9 @@ mmsend login
 
 ## 刪除
 
-使用者要收回剛傳的訊息 → `mmsend delete <訊息ID>`；不知道 ID 時 `mmsend delete --last`（這台電腦最近一次以 mmsend 傳送的那則）。
+使用者要收回剛傳的訊息 → `mmsend delete <訊息ID>`。
+不知道 ID 時用 `--last`（這台電腦最近一次以 mmsend 傳送的那則，排程送的也算）：先 `mmsend delete --last --dry-run`，
+把顯示的內容、時間、對象給使用者確認是那一則，再拿掉 `--dry-run`。
 刪除後提醒使用者：對方若已收到通知，通知內容收不回來。
 
 ## 別名
