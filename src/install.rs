@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SHARING_VIOLATION, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_EXPAND_SZ, RegCloseKey, RegOpenKeyExW,
     RegQueryValueExW, RegSetValueExW,
@@ -23,6 +23,15 @@ const EXE_NAME: &str = if cfg!(debug_assertions) { "mmsend-dev.exe" } else { "mm
 const ENVIRONMENT_KEY: &str = "Environment";
 const PATH_VALUE: &str = "Path";
 const BROADCAST_TIMEOUT_MS: u32 = 5000;
+/// Waits between attempts to move the installed exe aside: about five seconds in all,
+/// enough for an antivirus scan of a freshly written file.
+const RENAME_RETRY_DELAYS: [std::time::Duration; 5] = [
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+];
 
 /// major.minor.patch, as Cargo.toml has it; winresource writes the same numbers
 /// into the exe's version resource, which is how an installed copy is read back.
@@ -195,13 +204,34 @@ pub fn install_from(exe: &Path) -> Result<(), String> {
 /// aside first, and comes back if the new one cannot be written.
 fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
     let parked = std::env::temp_dir().join(format!("{COMMAND_NAME}-replaced-{}.exe", std::process::id()));
-    let moved_aside = target.exists() && std::fs::rename(target, &parked).is_ok();
+    let moved_aside = if target.exists() {
+        move_with_retries(target, &parked)
+            .map_err(|e| format!("無法替換 {}（檔案正被使用，請稍後再試）：{e}", target.display()))?;
+        true
+    } else {
+        false
+    };
     std::fs::copy(source, target).map(|_| ()).map_err(|e| {
         if moved_aside {
             let _ = std::fs::rename(&parked, target);
         }
         format!("無法寫入 {}：{e}", target.display())
     })
+}
+
+/// A freshly written exe is held for a moment by the antivirus scan, during which
+/// it cannot be renamed; an update right after installing ran into it.
+fn move_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempts = RENAME_RETRY_DELAYS.iter();
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => match attempts.next() {
+                Some(delay) => std::thread::sleep(*delay),
+                None => return Err(e),
+            },
+            result => return result,
+        }
+    }
 }
 
 fn shortcut_path() -> Result<PathBuf, String> {
