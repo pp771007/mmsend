@@ -11,6 +11,7 @@ mod store;
 mod subcommands;
 mod target;
 mod theme;
+mod update;
 
 use std::process::ExitCode;
 

@@ -17,6 +17,7 @@ mmsend status
 - 找不到指令 → 試完整路徑 `"$env:LOCALAPPDATA\Programs\mmsend\mmsend.exe" status`；也沒有就做「下載」。
 - 任何 `mmsend <指令>` 回「請指定收件對象」→ 裝的是還沒有那個指令的舊版，做「下載」換新版。
 - 第二行是「未安裝」或「已安裝其他版本」→ 執行 `mmsend install`。
+- 有一行「有新版」→ 先跟使用者說一聲，再執行 `mmsend update`。
 
 **下載**（PowerShell）：
 

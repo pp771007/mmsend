@@ -34,6 +34,17 @@ impl Version {
             part(env!("CARGO_PKG_VERSION_PATCH")),
         ])
     }
+
+    /// `0.2.0`, or a release tag's `v0.2.0`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let parts: Vec<u16> = text
+            .trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse().ok())
+            .collect::<Option<_>>()?;
+        Some(Self(parts.try_into().ok()?))
+    }
 }
 
 impl std::fmt::Display for Version {
@@ -133,14 +144,16 @@ fn same_file_contents(a: &Path, b: &Path) -> bool {
 }
 
 pub fn install() -> Result<(), String> {
+    install_from(&std::env::current_exe().map_err(|e| e.to_string())?)
+}
+
+/// Puts `exe` in place as the installed copy, then makes sure of PATH and the shortcut.
+pub fn install_from(exe: &Path) -> Result<(), String> {
     let dir = install_dir().ok_or("找不到 LOCALAPPDATA 環境變數")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("無法建立 {}：{e}", dir.display()))?;
-    let current = std::env::current_exe().map_err(|e| e.to_string())?;
     let target = installed_exe().ok_or("找不到 LOCALAPPDATA 環境變數")?;
-    if current != target {
-        std::fs::copy(&current, &target).map_err(|e| {
-            format!("無法複製到 {}（請先關閉其他 mmsend 視窗）：{e}", target.display())
-        })?;
+    if exe != target {
+        replace_file(exe, &target)?;
     }
     let (path, kind) = read_user_path()?;
     if !path_contains(&path, &dir) {
@@ -149,6 +162,20 @@ pub fn install() -> Result<(), String> {
     }
     // The download may be deleted after installing; this is how the window is reopened.
     create_shortcut(&target, &shortcut_path()?)
+}
+
+/// The installed copy may be running (this window, or a scheduled send), and Windows
+/// will not overwrite a running exe; it does let it be renamed. So the old copy moves
+/// aside first, and comes back if the new one cannot be written.
+fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
+    let parked = std::env::temp_dir().join(format!("{COMMAND_NAME}-replaced-{}.exe", std::process::id()));
+    let moved_aside = target.exists() && std::fs::rename(target, &parked).is_ok();
+    std::fs::copy(source, target).map(|_| ()).map_err(|e| {
+        if moved_aside {
+            let _ = std::fs::rename(&parked, target);
+        }
+        format!("無法寫入 {}：{e}", target.display())
+    })
 }
 
 fn shortcut_path() -> Result<PathBuf, String> {

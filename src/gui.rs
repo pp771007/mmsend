@@ -27,6 +27,7 @@ use crate::session::{Error, Session};
 use crate::store::{self, SendRecord};
 use crate::target::{self, Target, TemplateKind};
 use crate::theme::{self, CARD_RADIUS, Palette, RADIUS};
+use crate::update;
 
 const WINDOW_SIZE: [f32; 2] = [880.0, 660.0];
 const WINDOW_MIN_SIZE: [f32; 2] = [720.0, 520.0];
@@ -496,6 +497,12 @@ enum Msg {
     },
     Installed(Result<(), String>),
     Uninstalled(Result<(), String>),
+    /// `manual`: asked for from the menu, so the outcome is always reported.
+    UpdateChecked {
+        manual: bool,
+        result: Result<Version, String>,
+    },
+    Updated(Version, Result<(), String>),
 }
 
 /// The rows on screen, in display order.
@@ -514,6 +521,10 @@ enum Action {
     Send { target: Target, message: String },
     Install,
     ShowHistory,
+    CheckUpdate,
+    Update(Version),
+    /// Open the installed (updated) copy and close this one.
+    Restart,
     ConfirmLogout,
     ConfirmUninstall,
     Uninstall,
@@ -665,6 +676,12 @@ impl MainView {
 struct Installation {
     state: InstallState,
     installing: bool,
+    /// A newer release found on GitHub, until it is installed.
+    available: Option<Version>,
+    /// Installed from GitHub by this window; this running copy is still the old one.
+    updated_to: Option<Version>,
+    updating: bool,
+    checking: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -753,6 +770,10 @@ impl App {
         let installation = Installation {
             state: install::state(),
             installing: false,
+            available: None,
+            updated_to: None,
+            updating: false,
+            checking: false,
         };
         let mut app = App {
             ctx,
@@ -781,7 +802,23 @@ impl App {
             Err(Error::NotLoggedIn) => app.screen = Screen::Login(LoginForm::prefilled(None)),
             Err(e) => app.screen = Screen::Login(LoginForm::prefilled(Some(e.to_string()))),
         }
+        // At most once a day; within the day, the version found then.
+        match update::recent_latest() {
+            Some(latest) => app.installation.available = (latest > Version::current()).then_some(latest),
+            None => app.check_update(false),
+        }
         app
+    }
+
+    fn check_update(&mut self, manual: bool) {
+        if self.installation.checking {
+            return;
+        }
+        self.installation.checking = true;
+        self.spawn(move || Msg::UpdateChecked {
+            manual,
+            result: update::latest(),
+        });
     }
 
     fn spawn(&self, job: impl FnOnce() -> Msg + Send + 'static) {
@@ -915,6 +952,35 @@ impl App {
                     }
                     Err(e) => Toast::new(ToastKind::Error, e),
                 });
+                continue;
+            }
+            if let Msg::UpdateChecked { manual, result } = msg {
+                self.installation.checking = false;
+                match result {
+                    Ok(latest) => {
+                        update::remember(latest);
+                        let newer = latest > Version::current();
+                        self.installation.available = newer.then_some(latest);
+                        if manual && !newer {
+                            self.toast = Some(Toast::new(ToastKind::Success, format!("已是最新版本 v{}", Version::current())));
+                        }
+                    }
+                    // A daily look that fails says nothing; one asked for says why.
+                    Err(e) if manual => self.toast = Some(Toast::new(ToastKind::Error, format!("無法檢查更新：{e}"))),
+                    Err(_) => {}
+                }
+                continue;
+            }
+            if let Msg::Updated(version, result) = msg {
+                self.installation.updating = false;
+                match result {
+                    Ok(()) => {
+                        self.installation.available = None;
+                        self.installation.updated_to = Some(version);
+                        self.installation.state = install::state();
+                    }
+                    Err(e) => self.toast = Some(Toast::new(ToastKind::Error, e)),
+                }
                 continue;
             }
             if let Msg::Uninstalled(result) = msg {
@@ -1060,6 +1126,20 @@ impl App {
             }
             Action::ShowHistory => self.history = Some(store::load_send_records()),
             Action::ShowError(text) => self.toast = Some(Toast::new(ToastKind::Error, text)),
+            Action::CheckUpdate => self.check_update(true),
+            Action::Update(version) => {
+                self.installation.updating = true;
+                self.spawn(move || Msg::Updated(version, update::download_and_install(version)));
+            }
+            Action::Restart => {
+                let started = install::installed_exe()
+                    .ok_or_else(|| "找不到 LOCALAPPDATA 環境變數".to_owned())
+                    .and_then(|exe| std::process::Command::new(exe).spawn().map_err(|e| e.to_string()));
+                match started {
+                    Ok(_) => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                    Err(e) => self.toast = Some(Toast::new(ToastKind::Error, format!("無法重新開啟：{e}"))),
+                }
+            }
             Action::ConfirmLogout => self.confirming_logout = true,
             Action::ConfirmUninstall => self.uninstall = UninstallStep::Confirming,
             Action::Uninstall => {
@@ -1793,7 +1873,7 @@ fn main_ui(ui: &mut egui::Ui, view: &mut MainView, installation: &Installation, 
     egui::Panel::top("header")
         .frame(Frame::default().fill(p.surface).inner_margin(Margin::symmetric(PAGE_MARGIN, 12)))
         .show(ui, |ui| {
-            header(ui, view, installation.state != InstallState::NotInstalled, p, &mut action);
+            header(ui, view, installation, p, &mut action);
             install_banner(ui, installation, p, &mut action);
         });
 
@@ -1844,7 +1924,9 @@ fn main_ui(ui: &mut egui::Ui, view: &mut MainView, installation: &Installation, 
     action
 }
 
-fn header(ui: &mut egui::Ui, view: &mut MainView, installed: bool, p: &Palette, action: &mut Action) {
+fn header(ui: &mut egui::Ui, view: &mut MainView, installation: &Installation, p: &Palette, action: &mut Action) {
+    let installed = installation.state != InstallState::NotInstalled;
+    let checking_update = installation.checking;
     let name = view
         .directory
         .as_ref()
@@ -1870,6 +1952,11 @@ fn header(ui: &mut egui::Ui, view: &mut MainView, installed: bool, p: &Palette, 
                     ui.separator();
                     if menu_item(ui, Icon::History, "傳送紀錄", p.text).clicked() {
                         *action = Action::ShowHistory;
+                    }
+                    // Without waiting for the daily look.
+                    let label = if checking_update { "檢查中…" } else { "檢查更新" };
+                    if menu_item(ui, Icon::Refresh, label, p.text).clicked() {
+                        *action = Action::CheckUpdate;
                     }
                     // Rare, and it stops every script from sending: in the menu, behind a confirmation.
                     if menu_item(ui, Icon::Logout, "登出…", p.text).clicked() {
@@ -2277,9 +2364,28 @@ fn command_section(
     });
 }
 
-/// Installing is about the app, not the recipient, so it lives under the header as
-/// one line rather than in the composer, where it squeezed the list.
+/// Installing and updating are about the app, not the recipient, so they live under
+/// the header as one line rather than in the composer.
 fn install_banner(ui: &mut egui::Ui, installation: &Installation, p: &Palette, action: &mut Action) {
+    if let Some(version) = installation.updated_to {
+        let clicked = banner(ui, p, Icon::Refresh, "重新開啟", true, None, |ui| {
+            ui.label(RichText::new(format!("已更新至 v{version}，重新開啟後生效")).color(p.text));
+        });
+        if clicked {
+            *action = Action::Restart;
+        }
+        return;
+    }
+    if let Some(version) = installation.available {
+        let label = if installation.updating { "更新中…" } else { "更新" };
+        let clicked = banner(ui, p, Icon::Download, label, !installation.updating, None, |ui| {
+            ui.label(RichText::new(format!("有新版 v{version}")).color(p.text));
+        });
+        if clicked {
+            *action = Action::Update(version);
+        }
+        return;
+    }
     let button_label = match installation.state {
         InstallState::Installed => return,
         InstallState::Newer(installed) => {
@@ -2291,6 +2397,28 @@ fn install_banner(ui: &mut egui::Ui, installation: &Installation, p: &Palette, a
         InstallState::Outdated => format!("更新至 v{}", Version::current()),
         InstallState::NotInstalled => "安裝".to_owned(),
     };
+    let label = if installation.installing { "安裝中…" } else { &button_label };
+    let tip = format!("{INSTALL_LOCATION}，並新增開始功能表「{}」", crate::APP_NAME);
+    let clicked = banner(ui, p, Icon::Download, label, !installation.installing, Some(&tip), |ui| {
+        ui.label(RichText::new("安裝後指令只需輸入").color(p.text));
+        code_chip(ui, install::COMMAND_NAME, p);
+    });
+    if clicked {
+        *action = Action::Install;
+    }
+}
+
+/// One line under the header: what is going on, and the one button for it. Returns whether it was clicked.
+fn banner(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: Icon,
+    label: &str,
+    enabled: bool,
+    tip: Option<&str>,
+    text: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let mut clicked = false;
     ui.add_space(10.0);
     Frame::default()
         .fill(p.accent_soft)
@@ -2301,21 +2429,16 @@ fn install_banner(ui: &mut egui::Ui, installation: &Installation, p: &Palette, a
                 vec2(ui.available_width(), BANNER_BUTTON_HEIGHT),
                 Layout::right_to_left(Align::Center),
                 |ui| {
-                    let label = if installation.installing { "安裝中…" } else { &button_label };
-                    let tip = format!("{INSTALL_LOCATION}，並新增開始功能表「{}」", crate::APP_NAME);
                     let size = vec2(BANNER_BUTTON_WIDTH, BANNER_BUTTON_HEIGHT);
-                    let enabled = !installation.installing;
-                    if button(ui, ButtonKind::Primary, Some(Icon::Download), label, size, enabled, Some(&tip)).clicked() {
-                        *action = Action::Install;
-                    }
+                    clicked = button(ui, ButtonKind::Primary, Some(icon), label, size, enabled, tip).clicked();
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(RichText::new("安裝後指令只需輸入").color(p.text));
-                        code_chip(ui, install::COMMAND_NAME, p);
+                        text(ui);
                     });
                 },
             );
         });
+    clicked
 }
 
 fn code_chip(ui: &mut egui::Ui, text: &str, p: &Palette) {

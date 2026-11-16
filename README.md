@@ -59,6 +59,7 @@ Claude Code：把 [`skills/mmsend`](skills/mmsend) 資料夾複製到 `%USERPROF
 ```bat
 mmsend status      :: 版本、是否已安裝、是否已登入（會連線確認）
 mmsend install     :: 與設定視窗的「安裝」相同，並顯示安裝後的完整路徑
+mmsend update      :: 更新至最新版本（下載後先核對檢查碼）
 mmsend login       :: 只開啟登入視窗，登入後自動關閉
 mmsend find 王小明 :: 尋找人員、頻道或別名，每行開頭就是傳送時要用的參數
 mmsend --user alice --dry-run "訊息"  :: 試跑：顯示收件對象的姓名與內容，不傳送
@@ -77,6 +78,11 @@ mmsend delete --last                 :: 刪除最近一次傳送的訊息（或 
   由 Windows 以您的帳號加密，換成其他 Windows 帳號或其他電腦皆無法讀取。
 - 網址與帳號存放於 `%APPDATA%\mmsend\config.json`。
 - token 過期時，程式會自動以儲存的密碼重新登入。按「登出」會清除密碼與 token。
+
+## 更新
+
+設定視窗每天開啟時會檢查一次新版，有新版會在上方顯示「更新」按鈕；也可以從右上角「⋯」→「檢查更新」立即檢查。
+批次檔或排程執行 `mmsend` 傳送時不會檢查。
 
 ## 移除
 

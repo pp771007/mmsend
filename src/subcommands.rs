@@ -10,8 +10,8 @@ use clap::{ArgAction, Parser, Subcommand};
 
 use crate::api::{self, ApiError, Post, USER_SEARCH_LIMIT};
 use crate::cli::{
-    EXIT_NOT_LOGGED_IN, EXIT_OTHER, EXIT_TARGET_NOT_FOUND, EXIT_USAGE, Failure, TargetArgs,
-    login_failure, parse_target, summarize_text, usage_failure, with_retries,
+    EXIT_NOT_LOGGED_IN, EXIT_OTHER, EXIT_SEND_FAILED, EXIT_TARGET_NOT_FOUND, EXIT_USAGE, Failure,
+    TargetArgs, login_failure, parse_target, summarize_text, usage_failure, with_retries,
 };
 use crate::favorites::{self, Favorite};
 use crate::gui;
@@ -19,12 +19,26 @@ use crate::install::{self, InstallState, Version};
 use crate::session::{Error, Session};
 use crate::store;
 use crate::target::Target;
+use crate::update;
 
 pub const LOGIN: &str = "login";
 pub const STATUS: &str = "status";
 pub const FIND: &str = "find";
 pub const ALIAS: &str = "alias";
 pub const INSTALL: &str = "install";
+pub const UPDATE: &str = "update";
+
+/// Installs the newest release, if this is not it.
+pub fn update() -> Result<String, Failure> {
+    let latest = update::latest().map_err(|e| Failure::new(EXIT_SEND_FAILED, format!("無法檢查更新：{e}")))?;
+    update::remember(latest);
+    if latest <= Version::current() {
+        return Ok(format!("已是最新版本 v{}", Version::current()));
+    }
+    update::download_and_install(latest).map_err(|e| Failure::new(EXIT_OTHER, e))?;
+    let exe = install::installed_exe().map(|path| path.display().to_string()).unwrap_or_default();
+    Ok(format!("已更新至 v{latest}：{exe}"))
+}
 pub const DELETE: &str = "delete";
 
 #[derive(Parser)]
@@ -168,7 +182,17 @@ pub fn status() -> Result<String, Failure> {
         InstallState::Outdated => "已安裝其他版本，執行 mmsend install 改裝這一版",
         InstallState::NotInstalled => "未安裝，執行 mmsend install 後可直接輸入 mmsend",
     };
-    let head = format!("版本 {}\n{installed}", Version::current());
+    let mut head = format!("版本 {}\n{installed}", Version::current());
+    // Not knowing is no failure of status: a line is left out, the exit code is not affected.
+    if let Ok(latest) = update::latest() {
+        update::remember(latest);
+        head.push('\n');
+        head.push_str(&if latest > Version::current() {
+            format!("有新版 v{latest}：執行 mmsend {UPDATE} 更新")
+        } else {
+            "已是最新版本".to_owned()
+        });
+    }
     let login = Session::load().and_then(|mut session| {
         let me = with_retries(|| session.call(|c| c.me()))?;
         Ok(format!("已登入 {}（{}）", me.label(), session.config.server_url.trim_end_matches('/')))
