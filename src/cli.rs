@@ -15,7 +15,7 @@ use crate::favorites;
 use crate::session::{Error, Session};
 use crate::store::{self, SendRecord};
 use crate::subcommands;
-use crate::target::Target;
+use crate::target::{GROUP_OTHER_MEMBERS, Target};
 
 /// Exit codes scripts can branch on. 2 matches what clap uses for bad arguments.
 pub(crate) const EXIT_OTHER: u8 = 1;
@@ -464,8 +464,30 @@ pub(crate) fn parse_target(args: &TargetArgs) -> Result<Target, Failure> {
             .ok_or_else(|| Failure::new(EXIT_USAGE, "--channel 的格式為「團隊/頻道」，例如 dev/town-square"));
     }
     if let Some(spec) = &args.group {
-        return Target::parse_group(spec)
-            .ok_or_else(|| Failure::new(EXIT_USAGE, "--group 須列出成員帳號，例如 alice,bob"));
+        let invalid = || Failure::new(EXIT_USAGE, "--group 須列出成員帳號，例如 alice,bob");
+        let Some(Target::Group(mut members)) = Target::parse_group(spec) else {
+            return Err(invalid());
+        };
+        // Mattermost adds the sender anyway; listing yourself would hide a group too small.
+        if let Ok(Some(config)) = store::load_config() {
+            members.retain(|member| !member.eq_ignore_ascii_case(&config.username));
+        }
+        let target = Target::Group(members);
+        if let Target::Group(members) = &target
+            && !GROUP_OTHER_MEMBERS.contains(&members.len())
+        {
+            let problem = match members.as_slice() {
+                [] => return Err(invalid()),
+                [only] => format!("群組至少要 2 位其他成員；只傳給一個人請用 --user {only}"),
+                _ => format!(
+                    "群組最多 {} 位其他成員（Mattermost 群組含您最多 {} 人），人數更多請改用頻道",
+                    GROUP_OTHER_MEMBERS.end(),
+                    GROUP_OTHER_MEMBERS.end() + 1
+                ),
+            };
+            return Err(Failure::new(EXIT_USAGE, problem));
+        }
+        return Ok(target);
     }
     let id = args.channel_id.clone().expect("clap requires one target argument");
     Ok(Target::ChannelId(id))
@@ -541,6 +563,23 @@ fn session_failure(error: Error, target: &Target) -> Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_size_mattermost_refuses_is_caught_before_sending() {
+        let group = |spec: &str| {
+            parse_target(&TargetArgs {
+                user: None,
+                channel: None,
+                group: Some(spec.to_owned()),
+                to: None,
+                channel_id: None,
+            })
+        };
+        assert!(group("alice").is_err());
+        assert!(group("a,b").is_ok());
+        assert!(group("a,b,c,d,e,f,g").is_ok());
+        assert!(group("a,b,c,d,e,f,g,h").is_err());
+    }
 
     #[test]
     fn missing_recipient_is_explained() {

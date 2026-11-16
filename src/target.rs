@@ -36,6 +36,10 @@ impl TemplateKind {
     }
 }
 
+/// Mattermost group messages hold 3–8 people, the sender included. Checked before
+/// sending because a dry run never opens the group, so the server cannot refuse it there.
+pub const GROUP_OTHER_MEMBERS: std::ops::RangeInclusive<usize> = 2..=7;
+
 const MESSAGE_PLACEHOLDER: &str = "訊息內容";
 const FILE_PLACEHOLDER: &str = "訊息.txt";
 const PIPE_PLACEHOLDER: &str = "您的指令";
