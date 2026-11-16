@@ -14,7 +14,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// Mattermost returns the session token of a password login in this response header.
 const SESSION_TOKEN_HEADER: &str = "Token";
-const USER_SEARCH_LIMIT: u32 = 50;
+pub const USER_SEARCH_LIMIT: u32 = 50;
 /// Mattermost caps group messages at 8 members; 200 is the API's page maximum.
 const GROUP_MEMBER_LIMIT: &str = "200";
 

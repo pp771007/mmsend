@@ -69,6 +69,7 @@ const HELP_TEMPLATE: &str = "\
   <其他指令> | mmsend --user <帳號>     傳送其他指令的輸出
   mmsend login                          開啟登入視窗，登入後自動關閉
   mmsend status                         顯示版本、安裝與登入狀態
+  mmsend find <關鍵字>                  以姓名、帳號或頻道名稱尋找收件對象
   mmsend                                開啟設定視窗
 
 參數：
@@ -154,12 +155,16 @@ fn parse_args() -> Result<Args, clap::Error> {
 }
 
 /// clap's own messages are English; these cover what people actually get wrong.
-fn usage_failure(error: &clap::Error) -> Failure {
+pub(crate) fn usage_failure(error: &clap::Error) -> Failure {
     let arg = error
         .get(ContextKind::InvalidArg)
         .map(|value| value.to_string())
         .unwrap_or_default();
     let problem = match error.kind() {
+        // A missing positional (`mmsend find` without a keyword) shows as `<關鍵字>...`.
+        ErrorKind::MissingRequiredArgument if arg.starts_with('<') => {
+            format!("缺少{}", arg.trim_end_matches('.'))
+        }
         ErrorKind::MissingRequiredArgument => "請指定收件對象：--user、--channel、--group 或 --to".to_owned(),
         ErrorKind::ArgumentConflict => {
             "參數衝突：收件對象只能指定一個，訊息與 --file 也只能擇一".to_owned()
@@ -212,6 +217,7 @@ pub fn run() -> ExitCode {
         }
         Some(subcommands::LOGIN) => return report(subcommands::login()),
         Some(subcommands::STATUS) => return report(subcommands::status()),
+        Some(subcommands::FIND) => return report(subcommands::find()),
         _ => {}
     }
     let mut record = SendRecord::starting_now();
