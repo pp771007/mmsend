@@ -852,6 +852,11 @@ impl App {
             Some(latest) => app.installation.available = (latest > Version::current()).then_some(latest),
             None => app.check_update(false),
         }
+        // Downloading and opening it is the whole install: no button to find first.
+        // Not for a debug build, which a developer opens over and over.
+        if !cfg!(debug_assertions) && app.installation.state.installs_on_open() {
+            app.apply(Action::Install);
+        }
         app
     }
 
@@ -993,7 +998,10 @@ impl App {
                 self.toast = Some(match result {
                     Ok(()) => {
                         self.installation.state = InstallState::Installed;
-                        Toast::new(ToastKind::Success, "安裝完成，請在新開啟的 cmd 視窗中使用 mmsend")
+                        Toast::new(
+                            ToastKind::Success,
+                            format!("已安裝 v{}，新開的 cmd 視窗可直接輸入 mmsend", Version::current()),
+                        )
                     }
                     Err(e) => Toast::new(ToastKind::Error, e),
                 });

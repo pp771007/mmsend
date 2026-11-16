@@ -74,6 +74,17 @@ impl InstallState {
     pub fn commands_work(self) -> bool {
         matches!(self, Self::Installed | Self::Newer(_))
     }
+
+    /// Opening the window installs without asking when that can only help: nothing
+    /// installed yet, or an older version. Never a downgrade, and not another build
+    /// of the same version, which only a developer has.
+    pub fn installs_on_open(self) -> bool {
+        match self {
+            Self::NotInstalled => true,
+            Self::Different(Some(installed)) => installed < Version::current(),
+            Self::Different(None) | Self::Installed | Self::Newer(_) => false,
+        }
+    }
 }
 
 fn install_dir() -> Option<PathBuf> {
@@ -376,6 +387,19 @@ fn announce_environment_change() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_installs_only_over_nothing_or_an_older_version() {
+        let older = Version([0, 0, 0]);
+        let [major, minor, patch] = Version::current().0;
+        let newer = Version([major, minor, patch + 1]);
+        assert!(InstallState::NotInstalled.installs_on_open());
+        assert!(InstallState::Different(Some(older)).installs_on_open());
+        assert!(!InstallState::Different(Some(Version::current())).installs_on_open());
+        assert!(!InstallState::Different(None).installs_on_open());
+        assert!(!InstallState::Newer(newer).installs_on_open());
+        assert!(!InstallState::Installed.installs_on_open());
+    }
 
     #[test]
     fn install_appends_once_and_keeps_existing_entries() {
