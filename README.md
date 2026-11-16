@@ -55,6 +55,7 @@ mmsend --to 值班 "伺服器異常"
 
 ```bat
 mmsend status      :: 版本、是否已安裝、是否已登入（會連線確認）
+mmsend install     :: 與設定視窗的「安裝」相同，並顯示安裝後的完整路徑
 mmsend login       :: 只開啟登入視窗，登入後自動關閉
 mmsend find 王小明 :: 尋找人員、頻道或別名，每行開頭就是傳送時要用的參數
 mmsend --user alice --dry-run "訊息"  :: 試跑：顯示收件對象的姓名與內容，不傳送

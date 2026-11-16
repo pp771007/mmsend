@@ -67,6 +67,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend --user <帳號> --file 訊息.txt  從文字檔讀取訊息（適用於多行或含雙引號）
   mmsend --user <帳號> --attach <檔案>  附加檔案，可同時加上訊息
   <其他指令> | mmsend --user <帳號>     傳送其他指令的輸出
+  mmsend install                        安裝：之後在新開的視窗可直接輸入 mmsend
   mmsend login                          開啟登入視窗，登入後自動關閉
   mmsend status                         顯示版本、安裝與登入狀態
   mmsend find <關鍵字>                  以姓名、帳號或頻道名稱尋找收件對象
@@ -232,6 +233,7 @@ pub fn run() -> ExitCode {
         Some(subcommands::STATUS) => return report(subcommands::status()),
         Some(subcommands::FIND) => return report(subcommands::find()),
         Some(subcommands::ALIAS) => return report(subcommands::alias()),
+        Some(subcommands::INSTALL) => return report(subcommands::install()),
         _ => {}
     }
     let mut record = SendRecord::starting_now();

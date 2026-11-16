@@ -24,6 +24,24 @@ pub const LOGIN: &str = "login";
 pub const STATUS: &str = "status";
 pub const FIND: &str = "find";
 pub const ALIAS: &str = "alias";
+pub const INSTALL: &str = "install";
+
+/// What the Install button does: copy to a fixed folder on PATH, plus a Start menu entry.
+pub fn install() -> Result<String, Failure> {
+    let exe = install::installed_exe()
+        .ok_or_else(|| Failure::new(EXIT_OTHER, "找不到 LOCALAPPDATA 環境變數"))?
+        .display()
+        .to_string();
+    match install::state() {
+        InstallState::Installed => return Ok(format!("已安裝：{exe}")),
+        InstallState::Newer(version) => return Ok(format!("已安裝較新的版本 {version}：{exe}")),
+        InstallState::NotInstalled | InstallState::Outdated => {}
+    }
+    install::install().map_err(|e| Failure::new(EXIT_OTHER, e))?;
+    Ok(format!(
+        "已安裝：{exe}\n新開啟的 cmd / PowerShell 才能直接輸入 mmsend；已開啟的視窗請使用上面的完整路徑"
+    ))
+}
 
 /// clap's default headings are English.
 const HELP_TEMPLATE: &str = "\

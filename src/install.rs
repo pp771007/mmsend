@@ -64,6 +64,11 @@ fn install_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("Programs").join(COMMAND_NAME))
 }
 
+/// Where `install` puts the exe: the full path works before a new shell picks up PATH.
+pub fn installed_exe() -> Option<PathBuf> {
+    install_dir().map(|dir| dir.join(EXE_NAME))
+}
+
 pub fn state() -> InstallState {
     let Some(dir) = install_dir() else {
         return InstallState::NotInstalled;
@@ -131,7 +136,7 @@ pub fn install() -> Result<(), String> {
     let dir = install_dir().ok_or("找不到 LOCALAPPDATA 環境變數")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("無法建立 {}：{e}", dir.display()))?;
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
-    let target = dir.join(EXE_NAME);
+    let target = installed_exe().ok_or("找不到 LOCALAPPDATA 環境變數")?;
     if current != target {
         std::fs::copy(&current, &target).map_err(|e| {
             format!("無法複製到 {}（請先關閉其他 mmsend 視窗）：{e}", target.display())
