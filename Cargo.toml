@@ -1,6 +1,6 @@
 [package]
 name = "mmsend"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Send Mattermost messages from the Windows command line"
 license = "MIT"
