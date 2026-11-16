@@ -37,18 +37,25 @@ fn releases_url() -> String {
     RELEASES_URL.to_owned()
 }
 
-fn client(timeout: Duration) -> Result<Client, String> {
+/// `redirect`: whether to follow redirects. The version check must not (the redirect
+/// target *is* the answer); downloads must, since GitHub serves every release asset
+/// through a redirect to its file host.
+fn client(timeout: Duration, redirect: Policy) -> Result<Client, String> {
     Client::builder()
         .timeout(timeout)
-        .redirect(Policy::none())
+        .redirect(redirect)
         .user_agent(concat!("mmsend/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())
 }
 
+fn download_client() -> Result<Client, String> {
+    client(DOWNLOAD_TIMEOUT, Policy::default())
+}
+
 /// The newest published version.
 pub fn latest() -> Result<Version, String> {
-    let response = client(CHECK_TIMEOUT)?
+    let response = client(CHECK_TIMEOUT, Policy::none())?
         .head(format!("{}/latest", releases_url()))
         .send()
         .map_err(|e| format!("無法連線至 GitHub：{e}"))?;
@@ -98,19 +105,9 @@ pub fn remember(latest: Version) {
 /// Downloads `version`, checks it against its published SHA-256, and installs it.
 pub fn download_and_install(version: Version) -> Result<(), String> {
     let base = format!("{}/download/v{version}", releases_url());
-    let client = client(DOWNLOAD_TIMEOUT)?;
-    let fetch = |asset: &str| -> Result<Vec<u8>, String> {
-        let response = client
-            .get(format!("{base}/{asset}"))
-            .send()
-            .map_err(|e| format!("下載失敗：{e}"))?;
-        if !response.status().is_success() {
-            return Err(format!("下載失敗（HTTP {}）：{asset}", response.status().as_u16()));
-        }
-        response.bytes().map(|b| b.to_vec()).map_err(|e| format!("下載失敗：{e}"))
-    };
-    let exe = fetch(EXE_ASSET)?;
-    let checksum = String::from_utf8_lossy(&fetch(CHECKSUM_ASSET)?).into_owned();
+    let client = download_client()?;
+    let exe = fetch(&client, &format!("{base}/{EXE_ASSET}"))?;
+    let checksum = String::from_utf8_lossy(&fetch(&client, &format!("{base}/{CHECKSUM_ASSET}"))?).into_owned();
     let expected = checksum.split_whitespace().next().unwrap_or_default();
     if !sha256_hex(&exe).eq_ignore_ascii_case(expected) {
         return Err("下載的檔案與發佈的檢查碼不符，未更新".to_owned());
@@ -120,6 +117,14 @@ pub fn download_and_install(version: Version) -> Result<(), String> {
     let result = install::install_from(&downloaded);
     let _ = std::fs::remove_file(&downloaded);
     result
+}
+
+fn fetch(client: &Client, url: &str) -> Result<Vec<u8>, String> {
+    let response = client.get(url).send().map_err(|e| format!("下載失敗：{e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("下載失敗（HTTP {}）：{url}", response.status().as_u16()));
+    }
+    response.bytes().map(|b| b.to_vec()).map_err(|e| format!("下載失敗：{e}"))
 }
 
 fn download_path(version: Version) -> PathBuf {
@@ -133,6 +138,35 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GitHub answers every release download with a redirect to its file host.
+    #[test]
+    fn downloads_follow_the_redirect_to_the_file() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut request_line = String::new();
+                BufReader::new(&stream).read_line(&mut request_line).unwrap();
+                let reply = if request_line.contains("/download/") {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/files/mmsend.exe\r\n\
+                         Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nexe".to_owned()
+                };
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/download/v9.9.9/mmsend.exe");
+        assert_eq!(fetch(&download_client().unwrap(), &url).unwrap(), b"exe");
+        server.join().unwrap();
+    }
 
     #[test]
     fn latest_version_is_read_from_the_tag_redirect() {
