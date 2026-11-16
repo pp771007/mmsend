@@ -51,6 +51,9 @@ mmsend --to 值班 "伺服器異常"
 
 ### 給腳本或 AI 使用
 
+Claude Code：把 [`skills/mmsend`](skills/mmsend) 資料夾複製到 `%USERPROFILE%\.claude\skills\`，
+之後直接說「傳 Mattermost 跟王小明說報表好了」即可；還沒安裝 mmsend 時它會自己下載。
+
 不開設定視窗也能從頭做到傳送：
 
 ```bat
