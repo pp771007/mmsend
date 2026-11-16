@@ -61,6 +61,16 @@ const DIALOG_WIDTH: f32 = 460.0;
 const DIALOG_SIDE_GAP: f32 = 64.0;
 const HISTORY_MAX_HEIGHT: f32 = 460.0;
 const ALIAS_FIELD_WIDTH: f32 = 200.0;
+const ALIAS_TAG_FONT_SIZE: f32 = 12.0;
+const ALIAS_TAG_PADDING: Vec2 = vec2(6.0, 1.0);
+const ALIAS_TAG_GAP: f32 = 8.0;
+/// Fits the icon and 已釘選.
+const PIN_BUTTON_WIDTH: f32 = 92.0;
+const RECIPIENT_CARD_PADDING: i8 = 10;
+/// Between the recipient card and the message: what is kept versus what is sent now.
+const RECIPIENT_MESSAGE_GAP: f32 = 12.0;
+/// Shorter than the other fields: the recipient card should not squeeze the list.
+const ALIAS_MARGIN: Margin = Margin { left: 10, right: 10, top: 6, bottom: 6 };
 /// Window space a dialog needs besides its scrolling list: title, padding, margins.
 const DIALOG_CHROME_HEIGHT: f32 = 180.0;
 const TOAST_DURATION: Duration = Duration::from_millis(3500);
@@ -79,6 +89,8 @@ const SEND_BUTTON_SIZE: f32 = 30.0;
 const SEND_BUTTON_INSET: f32 = 21.0;
 const MESSAGE_MARGIN: Margin = Margin { left: 10, right: 42, top: 10, bottom: 10 };
 const GROUP_NAME_SEPARATOR: &str = "、";
+/// After your own name in the list; Mattermost's own zh-TW UI marks yourself the same way.
+const SELF_MARK: &str = " (您)";
 
 const AVATAR_COLORS: [Color32; 8] = [
     Color32::from_rgb(0x25, 0x63, 0xeb),
@@ -225,6 +237,8 @@ struct Entry {
     user_id: Option<String>,
     /// Last message time (ms), so recent conversations come first.
     last_activity: i64,
+    /// Empty: none. Shown as a tag beside the name, apart from the handle.
+    alias: String,
 }
 
 impl Entry {
@@ -243,12 +257,14 @@ impl Entry {
             target: Target::User(user.username.clone()),
             user_id: Some(user.id.clone()),
             last_activity,
+            alias: String::new(),
         }
     }
 
     fn matches(&self, needle_lowercase: &str) -> bool {
-        self.title.to_lowercase().contains(needle_lowercase)
-            || self.subtitle.to_lowercase().contains(needle_lowercase)
+        [&self.title, &self.subtitle, &self.alias]
+            .iter()
+            .any(|text| text.to_lowercase().contains(needle_lowercase))
     }
 
     fn fits(&self, filter: Filter) -> bool {
@@ -263,7 +279,8 @@ impl Entry {
         Favorite {
             target: self.target.clone(),
             alias: String::new(),
-            title: self.title.clone(),
+            // The mark is for this list; `mmsend alias` and `find` print the saved title.
+            title: self.title.trim_end_matches(SELF_MARK).to_owned(),
             subtitle: self.subtitle.clone(),
             user_id: self.user_id.clone(),
             private: self.kind == EntryKind::PrivateChannel,
@@ -272,7 +289,7 @@ impl Entry {
 }
 
 /// A pinned item as a row: as the directory lists it when it does (names may have
-/// changed since pinning), else as it was when pinned; the alias shown in front.
+/// changed since pinning), else as it was when pinned.
 fn favorite_entry(favorite: &Favorite, directory: &Directory) -> Entry {
     let listed = directory
         .people
@@ -291,11 +308,9 @@ fn favorite_entry(favorite: &Favorite, directory: &Directory) -> Entry {
         target: favorite.target.clone(),
         user_id: favorite.user_id.clone(),
         last_activity: 0,
+        alias: String::new(),
     });
-    if !favorite.alias.is_empty() {
-        let alias = format!("別名 {}", favorite.alias);
-        entry.subtitle = if entry.subtitle.is_empty() { alias } else { format!("{alias} · {}", entry.subtitle) };
-    }
+    entry.alias = favorite.alias.clone();
     entry
 }
 
@@ -365,6 +380,7 @@ fn load_directory(session: &mut Session) -> Result<Directory, Error> {
                         },
                         user_id: None,
                         last_activity: channel.last_post_at,
+                        alias: String::new(),
                     });
                 }
                 api::CHANNEL_DIRECT => {
@@ -396,6 +412,7 @@ fn load_directory(session: &mut Session) -> Result<Directory, Error> {
             target: Target::Group(usernames),
             user_id: None,
             last_activity: channel.last_post_at,
+            alias: String::new(),
         });
     }
 
@@ -414,8 +431,7 @@ fn load_directory(session: &mut Session) -> Result<Directory, Error> {
     channels.sort_by(by_recent_activity);
 
     let mut myself = Entry::person(&me, 0);
-    // Mattermost's own zh-TW UI marks yourself the same way.
-    myself.title = format!("{} (您)", display_name(&me));
+    myself.title = format!("{}{SELF_MARK}", display_name(&me));
     myself.subtitle = format!("@{}", me.username);
     people.insert(0, myself);
     Ok(Directory { me, people, channels })
@@ -1765,6 +1781,14 @@ fn header(ui: &mut egui::Ui, view: &mut MainView, installed: bool, p: &Palette, 
                 .align(egui::RectAlign::BOTTOM_END)
                 .width(MENU_WIDTH)
                 .show(|ui| {
+                    // Which server: rarely needed, so out of the header.
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(10.0);
+                        ui.add(Label::new(RichText::new(&view.host).small().color(p.text_weak)).truncate());
+                    });
+                    ui.add_space(2.0);
+                    ui.separator();
                     if menu_item(ui, Icon::History, "傳送紀錄", p.text).clicked() {
                         *action = Action::ShowHistory;
                     }
@@ -1779,7 +1803,7 @@ fn header(ui: &mut egui::Ui, view: &mut MainView, installed: bool, p: &Palette, 
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 ui.add(Label::new(RichText::new(&name).strong().color(p.text)).truncate());
-                let handle = format!("@{} · {}", view.username, view.host);
+                let handle = format!("@{}", view.username);
                 ui.add(Label::new(RichText::new(handle).small().color(p.text_weak)).truncate());
             });
         });
@@ -1893,7 +1917,13 @@ fn empty_hint(ui: &mut egui::Ui, text: &str, p: &Palette) {
 fn entry_row(ui: &mut egui::Ui, entry: &Entry, selected: bool, avatars: &mut Avatars, p: &Palette) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
     // Custom-painted rows are invisible to screen readers unless described.
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &entry.title));
+    response.widget_info(|| {
+        let label = match entry.alias.as_str() {
+            "" => entry.title.clone(),
+            alias => format!("{}（別名 {alias}）", entry.title),
+        };
+        egui::WidgetInfo::selected(egui::Role::Button, true, selected, label)
+    });
     if ui.is_rect_visible(rect) {
         let hover = ui.ctx().animate_bool_with_time(response.id, response.hovered(), HOVER_ANIMATION);
         let fill = if selected { p.accent_soft } else { Color32::TRANSPARENT.lerp_to_gamma(p.hover, hover) };
@@ -1912,17 +1942,28 @@ fn entry_row(ui: &mut egui::Ui, entry: &Entry, selected: bool, avatars: &mut Ava
         let painter = ui.painter_at(rect);
         let text_x = avatar_rect.right() + 12.0;
         let max_width = rect.right() - 12.0 - text_x;
-        let title = elided(&painter, &entry.title, FontId::proportional(15.0), p.text, max_width);
-        if entry.subtitle.is_empty() {
-            let y = rect.center().y - title.size().y / 2.0;
-            painter.galley(Pos2::new(text_x, y), title, p.text);
-        } else {
-            let subtitle = elided(&painter, &entry.subtitle, FontId::proportional(12.5), p.text_weak, max_width);
-            let gap = 2.0;
-            let top = rect.center().y - (title.size().y + gap + subtitle.size().y) / 2.0;
-            let subtitle_y = top + title.size().y + gap;
-            painter.galley(Pos2::new(text_x, top), title, p.text);
-            painter.galley(Pos2::new(text_x, subtitle_y), subtitle, p.text_weak);
+        let tag = (!entry.alias.is_empty())
+            .then(|| painter.layout_no_wrap(entry.alias.clone(), FontId::proportional(ALIAS_TAG_FONT_SIZE), p.accent));
+        let tag_room = tag.as_ref().map_or(0.0, |g| g.size().x + ALIAS_TAG_PADDING.x * 2.0 + ALIAS_TAG_GAP);
+        let title = elided(&painter, &entry.title, FontId::proportional(15.0), p.text, max_width - tag_room);
+        let subtitle = (!entry.subtitle.is_empty())
+            .then(|| elided(&painter, &entry.subtitle, FontId::proportional(12.5), p.text_weak, max_width));
+        let gap = 2.0;
+        let block_height = title.size().y + subtitle.as_ref().map_or(0.0, |s| gap + s.size().y);
+        let top = rect.center().y - block_height / 2.0;
+        let title_size = title.size();
+        painter.galley(Pos2::new(text_x, top), title, p.text);
+        if let Some(tag) = tag {
+            let tag_rect = Rect::from_min_size(
+                Pos2::new(text_x + title_size.x + ALIAS_TAG_GAP, top + (title_size.y - tag.size().y) / 2.0)
+                    - ALIAS_TAG_PADDING,
+                tag.size() + ALIAS_TAG_PADDING * 2.0,
+            );
+            painter.rect_filled(tag_rect, CornerRadius::same(4), p.accent_soft);
+            painter.galley(tag_rect.min + ALIAS_TAG_PADDING, tag, p.accent);
+        }
+        if let Some(subtitle) = subtitle {
+            painter.galley(Pos2::new(text_x, top + title_size.y + gap), subtitle, p.text_weak);
         }
     }
     response.on_hover_cursor(CursorIcon::PointingHand)
@@ -1941,30 +1982,39 @@ fn composer(
     let pinned = view.favorite_index(&entry.target);
     // Unpinning would silently break every script that uses the alias.
     let has_alias = view.alias_of(&entry.target).is_some();
-    ui.allocate_ui_with_layout(
-        vec2(ui.available_width(), ICON_BUTTON_SIZE),
-        Layout::right_to_left(Align::Center),
-        |ui| {
-            if icon_button(ui, Icon::Close, "關閉（Esc）").clicked() {
-                close = true;
-            }
-            let (icon, tip) = match (pinned, has_alias) {
-                (None, _) => (Icon::Pin, "釘選到清單最上方"),
-                (Some(_), false) => (Icon::Pinned, "取消釘選"),
-                (Some(_), true) => (Icon::Pinned, "請先清除別名再取消釘選"),
-            };
-            let size = Vec2::splat(ICON_BUTTON_SIZE);
-            if button(ui, ButtonKind::Ghost, Some(icon), "", size, !has_alias, Some(tip)).clicked() {
-                toggle_pin = true;
-            }
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.label(RichText::new("傳送給").color(p.text_weak));
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(SMALL_AVATAR_SIZE), Sense::hover());
-                paint_avatar(ui, &mut view.avatars, rect, entry, p);
-                ui.add(Label::new(RichText::new(&entry.title).strong().color(p.text)).truncate());
-            });
-        },
-    );
+    // Who, and what is kept about them (pin, alias), boxed apart from this one message.
+    Frame::default()
+        .fill(p.background)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(RADIUS))
+        .inner_margin(Margin::same(RECIPIENT_CARD_PADDING))
+        .show(ui, |ui| {
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), ICON_BUTTON_SIZE),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    if icon_button(ui, Icon::Close, "關閉（Esc）").clicked() {
+                        close = true;
+                    }
+                    let (icon, label, tip) = match (pinned, has_alias) {
+                        (None, _) => (Icon::Pin, "釘選", "釘選到清單最上方"),
+                        (Some(_), false) => (Icon::Pinned, "已釘選", "取消釘選"),
+                        (Some(_), true) => (Icon::Pinned, "已釘選", "請先清除別名再取消釘選"),
+                    };
+                    let size = vec2(PIN_BUTTON_WIDTH, ICON_BUTTON_SIZE);
+                    if button(ui, ButtonKind::Ghost, Some(icon), label, size, !has_alias, Some(tip)).clicked() {
+                        toggle_pin = true;
+                    }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.label(RichText::new("傳送給").color(p.text_weak));
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(SMALL_AVATAR_SIZE), Sense::hover());
+                        paint_avatar(ui, &mut view.avatars, rect, entry, p);
+                        ui.add(Label::new(RichText::new(&entry.title).strong().color(p.text)).truncate());
+                    });
+                },
+            );
+            alias_field(ui, view, entry, p, action);
+        });
     if close {
         view.selected = None;
         return;
@@ -1980,10 +2030,7 @@ fn composer(
         view.alias_draft = view.alias_of(&entry.target).unwrap_or_default().to_owned();
         view.alias_error = None;
     }
-    if let Some(index) = view.favorite_index(&entry.target) {
-        alias_field(ui, view, index, p, action);
-    }
-    ui.add_space(4.0);
+    ui.add_space(RECIPIENT_MESSAGE_GAP);
 
     let message_label = field_label(ui, "訊息", p);
     let message = ui
@@ -2072,25 +2119,25 @@ fn send_button(ui: &mut egui::Ui, field: &Response, sending: bool, sent: bool, e
     clicked
 }
 
-/// The alias of the selected pin. A valid alias is saved as it is typed, so the
-/// command below always shows what scripts can use right now.
-fn alias_field(ui: &mut egui::Ui, view: &mut MainView, index: usize, p: &Palette, action: &mut Action) {
-    ui.add_space(4.0);
+/// The selected recipient's alias. A valid alias is saved as it is typed (pinning
+/// the recipient), so the command below always shows what scripts can use right now.
+fn alias_field(ui: &mut egui::Ui, view: &mut MainView, entry: &Entry, p: &Palette, action: &mut Action) {
+    ui.add_space(6.0);
     ui.horizontal(|ui| {
         let label = field_label(ui, "別名", p);
         let field = ui
             .add(
                 TextEdit::singleline(&mut view.alias_draft)
                     .hint_text("例如：值班")
-                    .margin(INPUT_MARGIN)
+                    .margin(ALIAS_MARGIN)
                     .desired_width(ALIAS_FIELD_WIDTH),
             )
             .labelled_by(label);
         if field.changed() {
             let alias = view.alias_draft.trim().to_owned();
-            let target = view.favorites[index].target.clone();
+            let pin = entry.pin();
             let mut problem = None;
-            match favorites::update(|list| problem = favorites::set_alias(list, &target, &alias)) {
+            match favorites::update(|list| problem = favorites::set_alias(list, pin, &alias)) {
                 Ok(list) => view.favorites = list,
                 Err(e) => *action = Action::ShowError(e),
             }

@@ -59,13 +59,19 @@ pub fn toggle_pin(list: &mut Vec<Favorite>, pin: Favorite, unpin: bool) {
     }
 }
 
-/// The window's alias field: sets the alias of the pin on `target`, or says why it cannot.
-pub fn set_alias(list: &mut [Favorite], target: &Target, alias: &str) -> Option<String> {
-    if let Some(problem) = alias_problem(alias, list, target) {
+/// The window's alias field: sets the alias on `pin`'s target, or says why it cannot.
+/// An alias lives on a pin, so giving one pins the target, as `mmsend alias set` does.
+pub fn set_alias(list: &mut Vec<Favorite>, pin: Favorite, alias: &str) -> Option<String> {
+    if let Some(problem) = alias_problem(alias, list, &pin.target) {
         return Some(problem);
     }
-    if let Some(pinned) = list.iter_mut().find(|f| &f.target == target) {
-        pinned.alias = alias.to_owned();
+    match list.iter_mut().find(|f| f.target == pin.target) {
+        Some(pinned) => pinned.alias = alias.to_owned(),
+        None if !alias.is_empty() => list.push(Favorite {
+            alias: alias.to_owned(),
+            ..pin
+        }),
+        None => {}
     }
     None
 }
@@ -134,8 +140,8 @@ mod tests {
         // The file after `mmsend alias set 值班 --user bob`, which the open window never saw.
         let mut file = vec![pin(bob.clone(), "值班")];
 
-        toggle_pin(&mut file, pin(carol.clone(), ""), false);
-        assert_eq!(set_alias(&mut file, &carol, "早班"), None);
+        // Giving an alias pins carol, as `mmsend alias set` would.
+        assert_eq!(set_alias(&mut file, pin(carol.clone(), ""), "早班"), None);
         // The window still showed bob unpinned, so its button meant "pin"; and an
         // alias holder is never unpinned.
         toggle_pin(&mut file, pin(bob.clone(), ""), false);
