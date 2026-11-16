@@ -263,9 +263,10 @@ pub fn run() -> ExitCode {
     let code = match send(args, &mut record) {
         Ok((recipient, post_id)) => {
             record.ok = true;
-            record.detail = format!("已傳送給 {recipient}");
+            // One line: `for /f` in a batch file keeps the last line it reads, so a
+            // second line would silently replace this one.
+            record.detail = format!("已傳送給 {recipient}（訊息 ID：{post_id}）");
             println!("{}", record.detail);
-            println!("訊息 ID：{post_id}（刪除：mmsend {} {post_id}）", subcommands::DELETE);
             record.post_id = Some(post_id);
             ExitCode::SUCCESS
         }
