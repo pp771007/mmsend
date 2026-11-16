@@ -63,7 +63,10 @@ mmsend login       :: 只開啟登入視窗，登入後自動關閉
 mmsend find 王小明 :: 尋找人員、頻道或別名，每行開頭就是傳送時要用的參數
 mmsend --user alice --dry-run "訊息"  :: 試跑：顯示收件對象的姓名與內容，不傳送
 mmsend alias set 值班 --user alice    :: 設定別名（mmsend alias 列出，mmsend alias -h 看全部用法）
+mmsend delete --last                 :: 刪除最近一次傳送的訊息（或 mmsend delete <傳送時顯示的訊息 ID>）
 ```
+
+刪除只限自己傳的訊息；對方若已收到手機、桌面或 Email 通知，通知內容無法收回。
 
 `mmsend login` 的視窗固定在最上層，登入後自動關閉並顯示登入的帳號；未登入就關閉視窗時，結束代碼為 3。
 密碼只在視窗中輸入，呼叫的一方拿不到。

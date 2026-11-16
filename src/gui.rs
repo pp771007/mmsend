@@ -984,7 +984,8 @@ impl App {
                                     file_ids: &[],
                                 })
                             })
-                        });
+                        })
+                        .map(|_| ());
                     Msg::Sent(result)
                 });
             }

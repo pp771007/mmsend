@@ -187,6 +187,15 @@ pub struct NewPost<'a> {
 }
 
 #[derive(Deserialize)]
+pub struct Post {
+    pub id: String,
+    /// Who wrote it.
+    pub user_id: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Deserialize)]
 struct UploadResponse {
     file_infos: Vec<UploadedFile>,
 }
@@ -360,8 +369,17 @@ impl Client {
             })
     }
 
-    pub fn create_post(&self, post: &NewPost) -> Result<(), ApiError> {
-        send_json::<IgnoredAny>(self.request(Method::POST, &["posts"]).json(post)).map(|_| ())
+    pub fn create_post(&self, post: &NewPost) -> Result<Post, ApiError> {
+        send_json(self.request(Method::POST, &["posts"]).json(post))
+    }
+
+    /// `Err(NotFound)` once deleted.
+    pub fn post(&self, post_id: &str) -> Result<Post, ApiError> {
+        send_json(self.request(Method::GET, &["posts", post_id]))
+    }
+
+    pub fn delete_post(&self, post_id: &str) -> Result<(), ApiError> {
+        send_json::<IgnoredAny>(self.request(Method::DELETE, &["posts", post_id])).map(|_| ())
     }
 
     fn request(&self, method: Method, path: &[&str]) -> RequestBuilder {

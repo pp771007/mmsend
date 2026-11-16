@@ -8,10 +8,10 @@ use std::collections::HashSet;
 use clap::error::ErrorKind;
 use clap::{ArgAction, Parser, Subcommand};
 
-use crate::api::{self, ApiError, USER_SEARCH_LIMIT};
+use crate::api::{self, ApiError, Post, USER_SEARCH_LIMIT};
 use crate::cli::{
     EXIT_NOT_LOGGED_IN, EXIT_OTHER, EXIT_TARGET_NOT_FOUND, EXIT_USAGE, Failure, TargetArgs,
-    login_failure, parse_target, usage_failure, with_retries,
+    login_failure, parse_target, summarize_text, usage_failure, with_retries,
 };
 use crate::favorites::{self, Favorite};
 use crate::gui;
@@ -25,6 +25,77 @@ pub const STATUS: &str = "status";
 pub const FIND: &str = "find";
 pub const ALIAS: &str = "alias";
 pub const INSTALL: &str = "install";
+pub const DELETE: &str = "delete";
+
+#[derive(Parser)]
+#[command(
+    name = "mmsend delete",
+    about = "刪除自己傳的訊息。對方若已收到通知（手機、桌面、Email），通知無法收回。",
+    override_usage = "mmsend delete <訊息ID>\n  mmsend delete --last",
+    help_template = HELP_TEMPLATE,
+    no_binary_name = true,
+    disable_help_flag = true
+)]
+struct DeleteArgs {
+    /// 傳送成功時顯示的訊息 ID
+    #[arg(value_name = "訊息ID", required_unless_present = "last", conflicts_with = "last")]
+    post_id: Option<String>,
+
+    /// 刪除這台電腦最近一次以 mmsend 傳送的訊息
+    #[arg(long)]
+    last: bool,
+
+    /// 顯示說明
+    #[arg(short = 'h', long, action = ArgAction::Help)]
+    help: Option<bool>,
+}
+
+pub fn delete() -> Result<String, Failure> {
+    let args = match parse::<DeleteArgs>()? {
+        Ok(args) => args,
+        Err(help) => return Ok(help),
+    };
+    let post_id = match args.post_id {
+        Some(id) => id.trim().to_owned(),
+        // Always the newest send: run twice, the second finds it already deleted
+        // instead of reaching back to an older message.
+        None => store::load_send_records()
+            .map_err(|e| Failure::new(EXIT_OTHER, e))?
+            .into_iter()
+            .find_map(|record| record.post_id.filter(|_| record.ok))
+            .ok_or_else(|| Failure::new(EXIT_TARGET_NOT_FOUND, "傳送紀錄中沒有可刪除的訊息"))?,
+    };
+    let mut session = Session::load().map_err(login_failure)?;
+    let gone = || Failure::new(EXIT_TARGET_NOT_FOUND, format!("找不到訊息 {post_id}：可能已經刪除"));
+    let post = with_retries(|| session.call(|c| c.post(&post_id))).map_err(|e| match e {
+        Error::Api(ApiError::NotFound) => gone(),
+        e => login_failure(e),
+    })?;
+    refuse_unless_own(&post, &session.config.user_id)?;
+    match with_retries(|| session.call(|c| c.delete_post(&post_id))) {
+        // A retry after a lost response finds it gone: that is the goal reached.
+        Ok(()) | Err(Error::Api(ApiError::NotFound)) => {}
+        Err(Error::Api(ApiError::Forbidden)) => {
+            return Err(Failure::new(
+                EXIT_TARGET_NOT_FOUND,
+                "伺服器不允許刪除這則訊息（管理員可能關閉了刪除自己訊息的權限）",
+            ));
+        }
+        Err(e) => return Err(login_failure(e)),
+    }
+    let summary = summarize_text(&post.message);
+    let what = if summary.is_empty() { format!(" {post_id}") } else { format!("「{summary}」") };
+    Ok(format!("已刪除訊息{what}"))
+}
+
+/// The server lets an admin delete anyone's post; this command only ever takes back
+/// the user's own.
+fn refuse_unless_own(post: &Post, my_user_id: &str) -> Result<(), Failure> {
+    if post.user_id == my_user_id {
+        return Ok(());
+    }
+    Err(Failure::new(EXIT_TARGET_NOT_FOUND, format!("訊息 {} 不是您傳的，不能刪除", post.id)))
+}
 
 /// What the Install button does: copy to a fixed folder on PATH, plus a Start menu entry.
 pub fn install() -> Result<String, Failure> {
@@ -329,4 +400,20 @@ fn alias_line(favorite: &Favorite) -> String {
         format!("{} {}", favorite.target, favorite.title)
     };
     format!("  {}  {who}", Target::alias_args(&favorite.alias))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_your_own_posts_can_be_deleted() {
+        let post = |user_id: &str| Post {
+            id: "p1".into(),
+            user_id: user_id.into(),
+            message: String::new(),
+        };
+        assert!(refuse_unless_own(&post("me"), "me").is_ok());
+        assert!(refuse_unless_own(&post("someone-else"), "me").is_err());
+    }
 }

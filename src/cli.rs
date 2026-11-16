@@ -72,6 +72,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend status                         顯示版本、安裝與登入狀態
   mmsend find <關鍵字>                  以姓名、帳號或頻道名稱尋找收件對象
   mmsend alias                          列出或設定別名（mmsend alias -h）
+  mmsend delete <訊息ID>                刪除自己傳的訊息；--last 刪除最近一則
   mmsend                                開啟設定視窗
 
 參數：
@@ -234,6 +235,7 @@ pub fn run() -> ExitCode {
         Some(subcommands::FIND) => return report(subcommands::find()),
         Some(subcommands::ALIAS) => return report(subcommands::alias()),
         Some(subcommands::INSTALL) => return report(subcommands::install()),
+        Some(subcommands::DELETE) => return report(subcommands::delete()),
         _ => {}
     }
     let mut record = SendRecord::starting_now();
@@ -259,10 +261,12 @@ pub fn run() -> ExitCode {
         return report(dry_run(&args));
     }
     let code = match send(args, &mut record) {
-        Ok(recipient) => {
+        Ok((recipient, post_id)) => {
             record.ok = true;
             record.detail = format!("已傳送給 {recipient}");
             println!("{}", record.detail);
+            println!("訊息 ID：{post_id}（刪除：mmsend {} {post_id}）", subcommands::DELETE);
+            record.post_id = Some(post_id);
             ExitCode::SUCCESS
         }
         Err(failure) => {
@@ -309,7 +313,7 @@ fn log(record: &SendRecord) {
     let _ = store::append_send_record(record);
 }
 
-fn summarize_text(text: &str) -> String {
+pub(crate) fn summarize_text(text: &str) -> String {
     let line = text.lines().find(|line| !line.trim().is_empty() && !line.starts_with("```"));
     line.unwrap_or_default().chars().take(SUMMARY_CHARS).collect()
 }
@@ -324,8 +328,8 @@ fn summarize(outgoing: &Outgoing) -> String {
     if text.is_empty() { files } else { format!("{text}（{files}）") }
 }
 
-/// Returns who it went to, by name.
-fn send(args: Args, record: &mut SendRecord) -> Result<String, Failure> {
+/// Returns who it went to, by name, and the new post's id.
+fn send(args: Args, record: &mut SendRecord) -> Result<(String, String), Failure> {
     let target = parse_target(&args.target)?;
     record.target = target.to_string();
     let outgoing = compose(read_message(&args)?, args.code, read_attachments(&args.attach)?)?;
@@ -347,8 +351,9 @@ fn send(args: Args, record: &mut SendRecord) -> Result<String, Failure> {
         pending_post_id: &pending_post_id,
         file_ids: &file_ids,
     };
-    with_retries(|| session.call(|c| c.create_post(&post))).map_err(|e| session_failure(e, &target))?;
-    Ok(recipient.label)
+    let sent =
+        with_retries(|| session.call(|c| c.create_post(&post))).map_err(|e| session_failure(e, &target))?;
+    Ok((recipient.label, sent.id))
 }
 
 struct Attachment {

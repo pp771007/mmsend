@@ -71,6 +71,9 @@ pub struct SendRecord {
     pub detail: String,
     /// The start of the message and the attachment names, to tell runs apart.
     pub summary: String,
+    /// The sent post, for `mmsend delete --last`; absent in records older than that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_id: Option<String>,
 }
 
 impl SendRecord {
@@ -90,6 +93,7 @@ impl SendRecord {
             ok: false,
             detail: String::new(),
             summary: String::new(),
+            post_id: None,
         }
     }
 }
