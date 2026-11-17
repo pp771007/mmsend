@@ -1,6 +1,6 @@
-//! The app icon (a paper plane in front of an "M" on a navy tile), drawn in code so
-//! the repository carries no binary assets. Shared by the window icon and, via
-//! build.rs, the exe's .ico resource.
+//! The app icon (a paper plane in front of an "M" on a navy tile), drawn in code.
+//! Shared by the window icon, the exe's .ico resource (via build.rs) and the
+//! README's docs/logo.png (via examples/export_logo.rs).
 
 const SUPERSAMPLE: u32 = 4;
 const TILE_MARGIN: f32 = 0.04;
