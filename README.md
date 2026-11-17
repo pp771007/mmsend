@@ -28,12 +28,13 @@ AI  ▸ mmsend find 王小明
       收件對象：@alice 王小明
       內容：
         報表跑完了
+      確認碼：5a1f-c8d6-e3b0（傳送時加上 --confirm 5a1f-c8d6-e3b0）
 
       要傳給 @alice 王小明 嗎？
 
 你  ▸ 好
 
-AI  ▸ mmsend --user alice "報表跑完了"
+AI  ▸ mmsend --user alice --confirm 5a1f-c8d6-e3b0 "報表跑完了"
       已傳送給 @alice 王小明（訊息 ID：ykt8phtqe78f3p9erz43raxauh）
 ```
 
