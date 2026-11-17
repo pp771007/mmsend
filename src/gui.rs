@@ -135,6 +135,11 @@ const FILTER_CHOICES: [(Filter, &str); 3] = [
 ];
 
 pub fn run() -> ExitCode {
+    // An older copy, such as the downloaded file left on the desktop, opens the
+    // installed newer version instead of offering to download what is already there.
+    if !cfg!(debug_assertions) && matches!(install::state(), InstallState::Newer(_)) && install::launch_installed().is_ok() {
+        return ExitCode::SUCCESS;
+    }
     match open_window(None) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -1197,10 +1202,7 @@ impl App {
                 self.spawn(move || Msg::Updated(version, update::download_and_install(version)));
             }
             Action::Restart => {
-                let started = install::installed_exe()
-                    .ok_or_else(|| "找不到 LOCALAPPDATA 環境變數".to_owned())
-                    .and_then(|exe| std::process::Command::new(exe).spawn().map_err(|e| e.to_string()));
-                match started {
+                match install::launch_installed() {
                     Ok(_) => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                     Err(e) => self.toast = Some(Toast::new(ToastKind::Error, format!("無法重新開啟：{e}"))),
                 }
@@ -2544,7 +2546,12 @@ fn install_banner(ui: &mut egui::Ui, installation: &Installation, p: &Palette, a
         }
         return;
     }
-    if let Some(version) = installation.available {
+    // A version already installed is not news to an older copy (one that could not
+    // hand over to it on opening): the Newer notice below points there instead.
+    let available = installation.available.filter(
+        |latest| !matches!(installation.state, InstallState::Newer(installed) if installed >= *latest),
+    );
+    if let Some(version) = available {
         let label = if installation.updating { "更新中…" } else { "更新" };
         let clicked = banner(ui, p, Icon::Download, label, !installation.updating, None, |ui| {
             ui.label(RichText::new(format!("有新版 v{version}")).color(p.text));
@@ -2633,6 +2640,7 @@ fn code_chip(ui: &mut egui::Ui, text: &str, p: &Palette) {
 mod tests {
     use super::*;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
 
     #[test]
     fn login_fields_keep_the_ime_off() {
@@ -2647,5 +2655,24 @@ mod tests {
         });
         harness.run();
         assert!(harness.output().platform_output.ime.is_none());
+    }
+
+    #[test]
+    fn an_older_copy_does_not_offer_the_version_already_installed() {
+        let installed = Version::parse("99.0.0").unwrap();
+        let installation = Installation {
+            state: InstallState::Newer(installed),
+            installing: false,
+            available: Some(installed),
+            updated_to: None,
+            updating: false,
+            checking: false,
+        };
+        let mut harness = Harness::builder().allow_missing_glyphs().build_ui(|ui| {
+            install_banner(ui, &installation, &theme::LIGHT, &mut Action::None);
+        });
+        harness.run();
+        assert!(harness.query_by_label_contains("有新版").is_none());
+        assert!(harness.query_by_label_contains("已安裝較新的").is_some());
     }
 }

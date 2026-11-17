@@ -115,6 +115,21 @@ pub fn installed_exe() -> Option<PathBuf> {
     install_dir().map(|dir| dir.join(EXE_NAME))
 }
 
+/// Starts the installed copy as a program of its own. No standard handles are passed
+/// on: a double-clicked window has freed its console, and handing the dead console
+/// handles to the new process fails with os error 50 (不支援這個要求).
+pub fn launch_installed() -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    let exe = installed_exe().ok_or_else(|| "找不到 LOCALAPPDATA 環境變數".to_owned())?;
+    Command::new(exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 pub fn state() -> InstallState {
     let Some(dir) = install_dir() else {
         return InstallState::NotInstalled;
