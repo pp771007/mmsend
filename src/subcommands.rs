@@ -30,6 +30,9 @@ pub const UPDATE: &str = "update";
 
 /// Installs the newest release, if this is not it.
 pub fn update() -> Result<String, Failure> {
+    if let Some(help) = no_arguments(UPDATE, "更新至最新版本（下載後先核對檢查碼），已是最新版本時不做任何事。")? {
+        return Ok(help);
+    }
     let latest = update::latest().map_err(|e| Failure::new(EXIT_SEND_FAILED, format!("無法檢查更新：{e}")))?;
     update::remember(latest);
     if latest <= Version::current() {
@@ -126,6 +129,10 @@ fn refuse_unless_own(post: &Post, my_user_id: &str) -> Result<(), Failure> {
 
 /// What the Install button does: copy to a fixed folder on PATH, plus a Start menu entry.
 pub fn install() -> Result<String, Failure> {
+    let about = "安裝這個檔案：之後在新開的視窗可直接輸入 mmsend，並顯示安裝後的完整路徑。";
+    if let Some(help) = no_arguments(INSTALL, about)? {
+        return Ok(help);
+    }
     let exe = install::installed_exe()
         .ok_or_else(|| Failure::new(EXIT_OTHER, "找不到 LOCALAPPDATA 環境變數"))?
         .display()
@@ -154,6 +161,40 @@ const HELP_TEMPLATE: &str = "\
 選項：
 {options}";
 
+const NO_ARGUMENTS_HELP_TEMPLATE: &str = "\
+{about}
+
+用法：
+  {usage}
+
+選項：
+{options}";
+
+/// For the commands that take no arguments: `Some(help)` for -h, and any other word
+/// refused, so that a look at `mmsend install -h` never installs.
+fn no_arguments(name: &'static str, about: &'static str) -> Result<Option<String>, Failure> {
+    no_arguments_in(name, about, std::env::args_os().skip(2))
+}
+
+fn no_arguments_in(
+    name: &'static str,
+    about: &'static str,
+    words: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Option<String>, Failure> {
+    let command = clap::Command::new(name)
+        .about(about)
+        .override_usage(format!("mmsend {name}"))
+        .help_template(NO_ARGUMENTS_HELP_TEMPLATE)
+        .no_binary_name(true)
+        .disable_help_flag(true)
+        .arg(clap::Arg::new("help").short('h').long("help").action(ArgAction::Help).help("顯示說明"));
+    match command.try_get_matches_from(words) {
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == ErrorKind::DisplayHelp => Ok(Some(e.render().to_string())),
+        Err(_) => Err(Failure::new(EXIT_USAGE, format!("mmsend {name} 不需要參數"))),
+    }
+}
+
 /// Parses the words after `mmsend <command>`; `Ok(Err(help))` when help was asked for.
 /// The commands' parsers set `no_binary_name`, since `mmsend find` is two words.
 fn parse<T: Parser>() -> Result<Result<T, String>, Failure> {
@@ -166,6 +207,10 @@ fn parse<T: Parser>() -> Result<Result<T, String>, Failure> {
 
 /// Waits while the person logs in; the caller only ever sees the outcome, never the password.
 pub fn login() -> Result<String, Failure> {
+    let about = "開啟登入視窗，登入後自動關閉並顯示登入的帳號；沒登入就關閉視窗時，結束代碼為 3。";
+    if let Some(help) = no_arguments(LOGIN, about)? {
+        return Ok(help);
+    }
     if !gui::run_login().map_err(|e| Failure::new(EXIT_OTHER, e))? {
         return Err(Failure::new(EXIT_NOT_LOGGED_IN, "登入視窗已關閉，尚未登入"));
     }
@@ -177,6 +222,10 @@ pub fn login() -> Result<String, Failure> {
 
 /// What an agent checks first. Asks the server, so "logged in" means sending works.
 pub fn status() -> Result<String, Failure> {
+    let about = "顯示版本、是否已安裝、有沒有新版，以及登入狀態（會連線確認）。";
+    if let Some(help) = no_arguments(STATUS, about)? {
+        return Ok(help);
+    }
     let current = Version::current();
     let installed = match install::state() {
         InstallState::Installed | InstallState::Newer(_) if install::on_current_path() => {
@@ -462,5 +511,14 @@ mod tests {
         };
         assert!(refuse_unless_own(&post("me"), "me").is_ok());
         assert!(refuse_unless_own(&post("someone-else"), "me").is_err());
+    }
+
+    #[test]
+    fn a_command_without_arguments_answers_help_instead_of_running() {
+        let words = |list: &[&str]| list.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        let run = |list: &[&str]| no_arguments_in(INSTALL, "安裝", words(list));
+        assert!(matches!(run(&["-h"]), Ok(Some(help)) if help.contains("mmsend install")));
+        assert!(matches!(run(&[]), Ok(None)));
+        assert!(matches!(run(&["now"]), Err(failure) if failure.code == EXIT_USAGE));
     }
 }

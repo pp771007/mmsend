@@ -30,7 +30,7 @@ const EXIT_CODES: [(u8, &str); 7] = [
     (EXIT_OTHER, "其他錯誤"),
     (EXIT_USAGE, "參數錯誤或訊息為空"),
     (EXIT_NOT_LOGGED_IN, "尚未登入"),
-    (EXIT_LOGIN_EXPIRED, "登入已失效（密碼已變更）"),
+    (EXIT_LOGIN_EXPIRED, "登入已失效（密碼已變更、權杖被撤銷等）"),
     (EXIT_TARGET_NOT_FOUND, "找不到收件對象，或無權限"),
     (EXIT_SEND_FAILED, "連線或伺服器錯誤"),
 ];
