@@ -3,20 +3,19 @@
 //! Every send names a recipient flag first, so a bare first word can never have
 //! been meant as a message.
 
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::HashSet;
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, Parser, Subcommand};
 
-use crate::api::{self, ApiError, POSTS_PER_PAGE, Post, PostList, USER_SEARCH_LIMIT};
+use crate::api::{self, ApiError, Post, USER_SEARCH_LIMIT};
 use crate::cli::{
-    EXIT_NO_REPLIES, EXIT_NOT_LOGGED_IN, EXIT_OTHER, EXIT_SEND_FAILED, EXIT_TARGET_NOT_FOUND, EXIT_USAGE,
-    Failure, TargetArgs, login_failure, parse_target, summarize_text, usage_failure, with_retries,
+    EXIT_NOT_LOGGED_IN, EXIT_OTHER, EXIT_SEND_FAILED, EXIT_TARGET_NOT_FOUND, EXIT_USAGE, Failure,
+    TargetArgs, login_failure, parse_target, summarize_text, usage_failure, with_retries,
 };
 use crate::favorites::{self, Favorite};
 use crate::gui;
-use crate::install::{self, COMMAND_NAME, InstallState, Version};
+use crate::install::{self, InstallState, Version};
 use crate::session::{Error, Session};
 use crate::store;
 use crate::target::Target;
@@ -113,7 +112,7 @@ pub fn delete() -> Result<String, Failure> {
 }
 
 /// The newest message this PC sent, and "when, to whom".
-fn last_sent() -> Result<(String, String), Failure> {
+pub(crate) fn last_sent() -> Result<(String, String), Failure> {
     store::load_send_records()
         .map_err(|e| Failure::new(EXIT_OTHER, e))?
         .into_iter()
@@ -122,173 +121,6 @@ fn last_sent() -> Result<(String, String), Failure> {
             record.post_id.filter(|_| record.ok).map(|id| (id, sent))
         })
         .ok_or_else(|| Failure::new(EXIT_TARGET_NOT_FOUND, "傳送紀錄中沒有傳送成功的訊息"))
-}
-
-pub const REPLIES: &str = "replies";
-
-/// Scanning further back than this many posts after the message stops; an old
-/// message in a busy conversation would otherwise page through its whole history.
-const MAX_SCANNED_POSTS: usize = 1000;
-/// Mattermost ids are 26 letters and digits.
-const POST_ID_LENGTH: usize = 26;
-/// Join-and-leave notices and the like, which nobody wrote.
-const SYSTEM_POST_PREFIX: &str = "system_";
-
-#[derive(Parser)]
-#[command(
-    name = "mmsend replies",
-    about = "列出別人在您傳的訊息之後回的訊息，附件下載到暫存資料夾。\n私訊與群組列出之後的所有訊息；頻道只列出那則訊息的討論串。還沒有回覆時結束代碼為 7。",
-    override_usage = "mmsend replies <訊息ID>\n  mmsend replies --last",
-    help_template = HELP_TEMPLATE,
-    no_binary_name = true,
-    disable_help_flag = true
-)]
-struct RepliesArgs {
-    /// 傳送成功時顯示的訊息 ID
-    #[arg(value_name = "訊息ID", required_unless_present = "last", conflicts_with = "last")]
-    post_id: Option<String>,
-
-    /// 查這台電腦最近一次以 mmsend 傳送的訊息
-    #[arg(long)]
-    last: bool,
-
-    /// 顯示說明
-    #[arg(short = 'h', long, action = ArgAction::Help)]
-    help: Option<bool>,
-}
-
-/// Only for the user's own messages: given any post id, this would read any
-/// conversation the account can see, which is more than "what did they answer".
-pub fn replies() -> Result<String, Failure> {
-    let args = match parse::<RepliesArgs>()? {
-        Ok(args) => args,
-        Err(help) => return Ok(help),
-    };
-    let post_id = match args.post_id {
-        Some(id) => id.trim().to_owned(),
-        None => last_sent()?.0,
-    };
-    // The server answers a malformed id with a 400, which would read as a connection problem.
-    if post_id.len() != POST_ID_LENGTH || !post_id.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(Failure::new(
-            EXIT_USAGE,
-            format!("「{post_id}」不是訊息 ID：請用傳送成功時顯示的 {POST_ID_LENGTH} 碼英數字"),
-        ));
-    }
-    let mut session = Session::load().map_err(login_failure)?;
-    let me = session.config.user_id.clone();
-    let post = with_retries(|| session.call(|c| c.post(&post_id))).map_err(|e| match e {
-        Error::Api(ApiError::NotFound) => {
-            Failure::new(EXIT_TARGET_NOT_FOUND, format!("找不到訊息 {post_id}：可能已經刪除"))
-        }
-        e => login_failure(e),
-    })?;
-    if post.user_id != me {
-        return Err(Failure::new(
-            EXIT_TARGET_NOT_FOUND,
-            format!("訊息 {post_id} 不是您傳的：只能查自己傳的訊息的回覆"),
-        ));
-    }
-    let channel = with_retries(|| session.call(|c| c.channel(&post.channel_id))).map_err(login_failure)?;
-    // In a channel, what follows a message is mostly other conversations; a reply
-    // to it is what was written in its thread.
-    let (lists, more) = if matches!(channel.kind.as_str(), api::CHANNEL_DIRECT | api::CHANNEL_GROUP) {
-        posts_after(&mut session, &post)?
-    } else {
-        (vec![with_retries(|| session.call(|c| c.thread(&post.id))).map_err(login_failure)?], false)
-    };
-    let replies = replies_in(lists, &me);
-    if replies.is_empty() {
-        return Err(Failure::new(EXIT_NO_REPLIES, "還沒有回覆"));
-    }
-
-    let ids: Vec<String> = replies.iter().map(|reply| reply.user_id.clone()).collect::<HashSet<_>>().into_iter().collect();
-    // Without names the replies still read; the handle is only missing.
-    let names: HashMap<String, String> = with_retries(|| session.call(|c| c.users_by_ids(&ids)))
-        .map(|users| users.into_iter().map(|user| (user.id.clone(), user.label())).collect())
-        .unwrap_or_default();
-    let folder = std::env::temp_dir().join(format!("{COMMAND_NAME}-replies")).join(&post.id);
-    let mut taken = HashSet::new();
-    let mut blocks = vec![format!("{} 則回覆：", replies.len())];
-    for reply in &replies {
-        let who = names.get(&reply.user_id).cloned().unwrap_or_else(|| reply.user_id.clone());
-        // Indented, so a line someone wrote cannot pass for one of these headers.
-        let mut lines = vec![format!("{} {who}", store::local_time(reply.create_at))];
-        lines.extend(reply.message.lines().map(|line| format!("  {line}")));
-        for file in &reply.metadata.files {
-            let saved = save_attachment(&mut session, &folder, file, &mut taken);
-            lines.push(match saved {
-                Ok(path) => format!("  附件：{}", path.display()),
-                Err(problem) => format!("  附件「{}」下載失敗：{problem}", file.name),
-            });
-        }
-        blocks.push(lines.join("\n"));
-    }
-    if more {
-        blocks.push(format!("（只查了之後的 {MAX_SCANNED_POSTS} 則訊息，更新的請在 Mattermost 查看）"));
-    }
-    Ok(blocks.join("\n\n"))
-}
-
-/// The pages after the message, and whether there are more than MAX_SCANNED_POSTS.
-fn posts_after(session: &mut Session, post: &Post) -> Result<(Vec<PostList>, bool), Failure> {
-    let mut lists = Vec::new();
-    for page in 0..(MAX_SCANNED_POSTS / POSTS_PER_PAGE) as u32 {
-        let list = with_retries(|| session.call(|c| c.posts_after(&post.channel_id, &post.id, page)))
-            .map_err(login_failure)?;
-        let full = list.order.len() >= POSTS_PER_PAGE;
-        lists.push(list);
-        if !full {
-            return Ok((lists, false));
-        }
-    }
-    Ok((lists, true))
-}
-
-/// What others wrote, oldest first. A page's `posts` also carries the thread starters
-/// of its replies, which can be older than the message, so only `order` counts.
-fn replies_in(lists: Vec<PostList>, me: &str) -> Vec<Post> {
-    let mut replies: Vec<Post> = lists
-        .into_iter()
-        .flat_map(|mut list| {
-            let order = std::mem::take(&mut list.order);
-            order.into_iter().filter_map(move |id| list.posts.remove(&id))
-        })
-        .filter(|post| post.user_id != me && !post.kind.starts_with(SYSTEM_POST_PREFIX))
-        .collect();
-    replies.sort_by_key(|post| post.create_at);
-    replies
-}
-
-/// Saves an attachment under `folder`; two with the same name keep both.
-fn save_attachment(
-    session: &mut Session,
-    folder: &std::path::Path,
-    file: &api::FileInfo,
-    taken: &mut HashSet<String>,
-) -> Result<PathBuf, String> {
-    let mut name = safe_file_name(&file.name, &file.id);
-    if !taken.insert(name.to_lowercase()) {
-        name = format!("{}-{name}", file.id);
-    }
-    let bytes = with_retries(|| session.call(|c| c.download_file(&file.id))).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-    let path = folder.join(name);
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-    Ok(path)
-}
-
-/// Someone else chose the name: it must stay a plain name inside the folder, so
-/// `..\..\x` or `C:\x` cannot write elsewhere.
-fn safe_file_name(name: &str, fallback: &str) -> String {
-    const NOT_IN_NAMES: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
-    let cleaned: String = name
-        .chars()
-        .map(|c| if c.is_control() || NOT_IN_NAMES.contains(&c) { '_' } else { c })
-        .collect();
-    // Windows drops trailing dots and spaces, so ".." would name the parent folder.
-    let cleaned = cleaned.trim().trim_end_matches(['.', ' ']);
-    if cleaned.is_empty() { fallback.to_owned() } else { cleaned.to_owned() }
 }
 
 /// The server lets an admin delete anyone's post; this command only ever takes back
@@ -322,7 +154,7 @@ pub fn install() -> Result<String, Failure> {
 }
 
 /// clap's default headings are English.
-const HELP_TEMPLATE: &str = "\
+pub(crate) const HELP_TEMPLATE: &str = "\
 {about}
 
 用法：
@@ -678,41 +510,6 @@ mod tests {
         };
         assert!(refuse_unless_own(&post("me"), "me").is_ok());
         assert!(refuse_unless_own(&post("someone-else"), "me").is_err());
-    }
-
-    #[test]
-    fn replies_are_what_others_wrote_after_the_message_oldest_first() {
-        let post = |id: &str, user_id: &str, create_at: i64, kind: &str| Post {
-            id: id.into(),
-            user_id: user_id.into(),
-            create_at,
-            kind: kind.into(),
-            ..Default::default()
-        };
-        let list = PostList {
-            order: vec!["late".into(), "mine".into(), "joined".into(), "early".into()],
-            posts: [
-                post("late", "howard", 30, ""),
-                post("mine", "me", 25, ""),
-                post("joined", "howard", 20, "system_join_channel"),
-                post("early", "howard", 10, ""),
-                // The thread starter of a reply, sent before the message asked about.
-                post("older-root", "howard", 1, ""),
-            ]
-            .into_iter()
-            .map(|post| (post.id.clone(), post))
-            .collect(),
-        };
-        let ids: Vec<String> = replies_in(vec![list], "me").into_iter().map(|post| post.id).collect();
-        assert_eq!(ids, ["early", "late"]);
-    }
-
-    #[test]
-    fn an_attachment_name_cannot_leave_the_folder() {
-        assert_eq!(safe_file_name("IMG_0001.PNG", "f1"), "IMG_0001.PNG");
-        assert_eq!(safe_file_name(r"..\..\evil.bat", "f1"), ".._.._evil.bat");
-        assert_eq!(safe_file_name("C:/x.txt", "f1"), "C__x.txt");
-        assert_eq!(safe_file_name("..", "f1"), "f1");
     }
 
     #[test]

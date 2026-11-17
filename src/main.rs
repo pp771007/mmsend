@@ -6,6 +6,7 @@ mod gui;
 mod icon;
 mod icons;
 mod install;
+mod replies;
 mod session;
 mod store;
 mod subcommands;

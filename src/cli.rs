@@ -11,6 +11,7 @@ use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
 use crate::APP_NAME;
 use crate::api::{ApiError, NewPost};
 use crate::console;
+use crate::replies;
 use crate::favorites;
 use crate::session::{Error, Session};
 use crate::store::{self, SendRecord};
@@ -78,7 +79,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend find <關鍵字>                  以姓名、帳號或頻道名稱尋找收件對象
   mmsend alias                          列出或設定別名（mmsend alias -h）
   mmsend delete <訊息ID>                刪除自己傳的訊息；--last 刪除最近一則
-  mmsend replies <訊息ID>               列出對方的回覆，附件存到暫存資料夾
+  mmsend replies <訊息ID>               列出對方的回覆與表情回應（mmsend replies -h）
   mmsend                                開啟設定視窗
 
 參數：
@@ -146,23 +147,23 @@ struct Args {
 pub(crate) struct TargetArgs {
     /// 傳送私訊給指定的 Mattermost 帳號
     #[arg(long, value_name = "帳號")]
-    user: Option<String>,
+    pub(crate) user: Option<String>,
 
     /// 傳送至頻道，使用網址中的名稱，例如 dev/town-square
     #[arg(long, value_name = "團隊/頻道")]
-    channel: Option<String>,
+    pub(crate) channel: Option<String>,
 
     /// 傳送至群組，列出除您以外的成員帳號，例如 alice,bob
     #[arg(long, value_name = "帳號,帳號")]
-    group: Option<String>,
+    pub(crate) group: Option<String>,
 
     /// 傳送給在設定視窗釘選時取的別名
     #[arg(long, value_name = "別名")]
-    to: Option<String>,
+    pub(crate) to: Option<String>,
 
     /// Raw channel id; kept for scripts written before --group existed.
     #[arg(long, value_name = "ID", hide = true)]
-    channel_id: Option<String>,
+    pub(crate) channel_id: Option<String>,
 }
 
 fn command() -> clap::Command {
@@ -249,7 +250,7 @@ pub fn run() -> ExitCode {
         Some(subcommands::INSTALL) => return report(subcommands::install()),
         Some(subcommands::UPDATE) => return report(subcommands::update()),
         Some(subcommands::DELETE) => return report(subcommands::delete()),
-        Some(subcommands::REPLIES) => return report(subcommands::replies()),
+        Some(replies::REPLIES) => return report(replies::replies()),
         _ => {}
     }
     let mut record = SendRecord::starting_now();
@@ -564,7 +565,7 @@ pub(crate) fn login_failure(error: Error) -> Failure {
     }
 }
 
-fn session_failure(error: Error, target: &Target) -> Failure {
+pub(crate) fn session_failure(error: Error, target: &Target) -> Failure {
     match error {
         Error::NotLoggedIn
         | Error::Api(ApiError::Unauthorized | ApiError::MfaRequired | ApiError::MfaCodeWrong)

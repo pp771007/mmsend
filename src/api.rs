@@ -213,6 +213,9 @@ pub struct Post {
     /// Milliseconds since epoch.
     #[serde(default)]
     pub create_at: i64,
+    /// The post that starts its thread; empty for a post that is not a reply.
+    #[serde(default)]
+    pub root_id: String,
     /// Empty for what a person wrote; `system_...` for "joined the channel" and the like.
     #[serde(default, rename = "type")]
     pub kind: String,
@@ -224,6 +227,15 @@ pub struct Post {
 pub struct PostMetadata {
     #[serde(default)]
     pub files: Vec<FileInfo>,
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct Reaction {
+    pub user_id: String,
+    /// `+1`, `white_check_mark`: the name Mattermost shows as `:+1:`.
+    pub emoji_name: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -436,15 +448,16 @@ impl Client {
         send_json(self.request(Method::GET, &["channels", channel_id]))
     }
 
-    /// One page of the posts written after `post_id` in its channel, thread replies included.
-    pub fn posts_after(&self, channel_id: &str, post_id: &str, page: u32) -> Result<PostList, ApiError> {
+    /// One page of a channel's posts, thread replies included: the newest, or with
+    /// `after`, the ones written after that post.
+    pub fn channel_posts(&self, channel_id: &str, after: Option<&str>, page: u32) -> Result<PostList, ApiError> {
         let page = page.to_string();
         let per_page = POSTS_PER_PAGE.to_string();
-        send_json(self.request_with_query(
-            Method::GET,
-            &["channels", channel_id, "posts"],
-            &[("after", post_id), ("page", &page), ("per_page", &per_page)],
-        ))
+        let mut query = vec![("page", page.as_str()), ("per_page", per_page.as_str())];
+        if let Some(post_id) = after {
+            query.push(("after", post_id));
+        }
+        send_json(self.request_with_query(Method::GET, &["channels", channel_id, "posts"], &query))
     }
 
     /// The post's thread: the post itself and every reply to it.
