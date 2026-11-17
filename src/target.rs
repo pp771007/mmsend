@@ -87,12 +87,6 @@ impl Target {
         format!("--to {alias}")
     }
 
-    /// cmd has no way to escape `"` inside a quoted argument (a stray quote turns
-    /// the rest of the line, `&` and `|` included, back into shell syntax), and a
-    /// command line cannot hold a newline. Such messages need the file form.
-    pub fn fits_inline(message: &str) -> bool {
-        !message.contains(['"', '\n', '\r'])
-    }
 
     /// Who this is, read-only: a dry run must not open a direct or group channel.
     pub fn look_up(&self, session: &mut Session) -> Result<Recipient, Error> {
@@ -195,13 +189,44 @@ pub fn command_line(program: &str, args: &str, kind: TemplateKind, message: &str
     let exe = program;
     let message = if message.is_empty() { MESSAGE_PLACEHOLDER } else { message };
     match kind {
-        TemplateKind::Inline => format!("{exe} {args} \"{message}\""),
+        TemplateKind::Inline => format!("{exe} {args} {}", quote_argument(message)),
         TemplateKind::File => format!("{exe} {args} --file \"{FILE_PLACEHOLDER}\""),
         // Command output is usually columns (dir, ipconfig) that only line up
         // in a code block.
         TemplateKind::Pipe => format!("{PIPE_PLACEHOLDER} | {exe} {args} --code"),
-        TemplateKind::Attach => format!("{exe} {args} --attach \"{ATTACH_PLACEHOLDER}\" \"{message}\""),
+        TemplateKind::Attach => {
+            format!("{exe} {args} --attach \"{ATTACH_PLACEHOLDER}\" {}", quote_argument(message))
+        }
     }
+}
+
+/// One quoted argument that both cmd and mmsend's own argument parsing (the MSVC
+/// rules) read back unchanged, the escaping BatBadBut (CVE-2024-24576) settled on:
+/// a `"` is written `""`, which mmsend reads as one quote and which keeps cmd inside
+/// the quoted text so `&` `|` `>` stay text; backslashes right before a quote,
+/// the closing one included, are doubled so they do not escape it.
+/// `%` is left as typed. The window's message field is single-line, so no newline.
+fn quote_argument(text: &str) -> String {
+    let mut quoted = String::from('"');
+    let mut backslashes = 0;
+    for c in text.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+                quoted.push_str("\"\"");
+                backslashes = 0;
+            }
+            c => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes));
+                quoted.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 impl fmt::Display for Target {
@@ -244,10 +269,12 @@ mod tests {
     }
 
     #[test]
-    fn messages_cmd_cannot_quote_are_flagged() {
-        assert!(Target::fits_inline("100% done & ok"));
-        assert!(!Target::fits_inline(r#"he said "hi""#));
-        assert!(!Target::fits_inline("line 1\nline 2"));
+    fn quotes_and_trailing_backslashes_survive_cmd_and_argument_parsing() {
+        let args = Target::User("alice".into()).cli_args();
+        assert_eq!(
+            command_line("mmsend", &args, TemplateKind::Inline, r#"he said "hi" & left \"x\" C:\out\"#),
+            r#"mmsend --user alice "he said ""hi"" & left \\""x\\"" C:\out\\""#
+        );
     }
 
     #[test]

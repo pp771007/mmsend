@@ -2540,10 +2540,6 @@ fn command_section(
             ui.add(Label::new(RichText::new(&command).monospace().color(p.code_text)).wrap());
         });
 
-    let blocked = view.template.quotes_message() && !Target::fits_inline(&view.message);
-    if blocked {
-        notice(ui, Icon::Warning, "訊息含有雙引號或換行，請改用「文字檔」", p.danger, p.danger_soft);
-    }
     ui.add_space(4.0);
     // Only a single-line message can be sent from here: the other forms need a file,
     // a pipe or an attachment the window does not have.
@@ -2557,7 +2553,7 @@ fn command_section(
             (true, false) => (Icon::Copy, "複製指令"),
         };
         let size = vec2(copy_width, CONTROL_HEIGHT);
-        if button(ui, ButtonKind::Primary, Some(icon), label, size, installed && !blocked, None).clicked() {
+        if button(ui, ButtonKind::Primary, Some(icon), label, size, installed, None).clicked() {
             ui.ctx().copy_text(command);
             view.copied_at = Some(Instant::now());
         }
