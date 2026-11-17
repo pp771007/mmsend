@@ -41,7 +41,7 @@ AI  ▸ mmsend --user alice "報表跑完了"
 
 - 🧰 **從零開始**：還沒安裝時 AI 會自己下載、核對檢查碼、安裝，你不必打開任何東西。
 - 🔑 **密碼不經過 AI**：`mmsend login` 在你的螢幕上跳出登入視窗，AI 只拿得到「登入成功」。
-- 👀 **先試跑、再傳送**：`--dry-run` 列出收件人姓名與訊息全文，你說好才送出。
+- 👀 **先試跑、再傳送**：`--dry-run` 列出收件人姓名與訊息全文，你說好才帶著它給的確認碼送出；內容在這之間被改過就送不出去。
 - 🔎 **找人不用猜**：`mmsend find 王小明` 每一行開頭就是傳送要用的參數。
 - ↩️ **傳錯收得回**：`mmsend delete --last` 刪掉剛傳的那則。
 - 💬 **讀得到回覆**：`mmsend replies` 列出對方的回覆與 👍 這類表情回應，截圖直接下載好；加 `--wait` 會等到對方回覆。只查得到自己傳的訊息。
@@ -91,7 +91,8 @@ mmsend install                      :: 安裝這個檔案，並顯示安裝後�
 mmsend update                       :: 更新至最新版本
 mmsend login                        :: 只開登入視窗，登入後自動關閉
 mmsend find 王小明                  :: 找人員、頻道或別名
-mmsend --user alice --dry-run "訊息" :: 試跑：顯示收件人姓名與內容，不傳送
+mmsend --user alice --dry-run "訊息" :: 試跑：顯示收件人姓名、內容與確認碼，不傳送
+mmsend --user alice --confirm <確認碼> "訊息" :: 傳送前核對：和試跑時不同就不傳送
 mmsend alias set 值班 --user alice   :: 設定別名（mmsend alias 列出）
 mmsend delete --last                :: 刪除最近一次傳送的訊息（或 mmsend delete <訊息 ID>）
 mmsend replies <訊息ID>             :: 對方的回覆與表情回應，附件存到暫存資料夾；還沒回覆時結束代碼 7

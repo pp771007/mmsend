@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use clap::error::{ContextKind, ErrorKind};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
+use sha2::{Digest, Sha256};
 
 use crate::APP_NAME;
 use crate::api::{ApiError, NewPost};
@@ -55,6 +56,11 @@ const PREVIEW_MAX_CHARS: usize = 2000;
 const SUMMARY_CHARS: usize = 60;
 /// How much of the message a dry run prints before saying how many lines remain.
 const DRY_RUN_LINES: usize = 10;
+
+/// What --confirm compares, in the order the confirmation code lists them.
+const CONFIRM_PARTS: [&str; 3] = ["收件對象", "訊息內容", "附件"];
+/// Hex digits per part: an accidental change slipping through is 1 in 65536.
+const CONFIRM_PART_DIGITS: usize = 4;
 
 const STDIN_MARKER: &str = "-";
 /// What cmd users type out of habit; it would otherwise be sent as a message.
@@ -124,9 +130,13 @@ struct Args {
     #[arg(long)]
     code: bool,
 
-    /// 試跑：檢查收件對象（顯示姓名）與內容，不傳送
+    /// 試跑：檢查收件對象（顯示姓名）與內容，不傳送；最後一行是確認碼
     #[arg(long)]
     dry_run: bool,
+
+    /// 核對試跑顯示的確認碼：收件對象、內容或附件和試跑時不同就不傳送
+    #[arg(long, value_name = "確認碼")]
+    confirm: Option<String>,
 
     /// 顯示說明
     #[arg(short = 'h', long, action = ArgAction::Help)]
@@ -299,6 +309,10 @@ pub fn run() -> ExitCode {
 fn dry_run(args: &Args) -> Result<String, Failure> {
     let target = parse_target(&args.target)?;
     let outgoing = compose(read_message(args)?, args.code, read_attachments(&args.attach)?)?;
+    let code = confirmation_code(&target, &outgoing);
+    if let Some(expected) = &args.confirm {
+        check_confirmation(expected, &code)?;
+    }
     let mut session = Session::load().map_err(|e| session_failure(e, &target))?;
     let recipient = with_retries(|| target.look_up(&mut session)).map_err(|e| session_failure(e, &target))?;
     if let Some(channel_id) = recipient.existing_channel_id() {
@@ -319,7 +333,58 @@ fn dry_run(args: &Args) -> Result<String, Failure> {
         let names: Vec<&str> = outgoing.files.iter().map(|file| file.name.as_str()).collect();
         lines.push(format!("附件：{}", names.join("、")));
     }
+    lines.push(format!("確認碼：{code}（傳送時加上 --confirm {code}）"));
     Ok(lines.join("\n"))
+}
+
+/// `1a2b-3c4d-5e6f`, one short hash per CONFIRM_PARTS entry, so that a refused send
+/// can say what changed. Taken from the post as it will go out, so an option that
+/// changes what the recipient sees (--code, a too-long text sent as a file) counts.
+fn confirmation_code(target: &Target, outgoing: &Outgoing) -> String {
+    let mut files = Sha256::new();
+    for file in &outgoing.files {
+        files.update(file.name.as_bytes());
+        files.update((file.bytes.len() as u64).to_le_bytes());
+        files.update(&file.bytes);
+    }
+    let parts = [
+        Sha256::digest(target.to_string().as_bytes()),
+        Sha256::digest(outgoing.message.as_bytes()),
+        files.finalize(),
+    ];
+    parts
+        .iter()
+        .map(|digest| digest[..CONFIRM_PART_DIGITS / 2].iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// The send someone approved is the one the dry run showed: a file edited since, or
+/// an argument retyped differently, stops it here.
+fn check_confirmation(expected: &str, actual: &str) -> Result<(), Failure> {
+    let expected = expected.trim().to_ascii_lowercase();
+    let wanted: Vec<&str> = expected.split('-').collect();
+    let well_formed = wanted.len() == CONFIRM_PARTS.len()
+        && wanted
+            .iter()
+            .all(|part| part.len() == CONFIRM_PART_DIGITS && part.chars().all(|c| c.is_ascii_hexdigit()));
+    if !well_formed {
+        return Err(Failure::new(EXIT_USAGE, format!("確認碼「{expected}」格式不對：請用試跑最後一行顯示的確認碼")));
+    }
+    let changed: Vec<&str> = actual
+        .split('-')
+        .zip(&wanted)
+        .zip(CONFIRM_PARTS)
+        .filter(|((now, approved), _)| now != *approved)
+        .map(|(_, part)| part)
+        .collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(Failure::new(
+        EXIT_USAGE,
+        format!("{}和試跑時不同，未傳送：請重新試跑，確認內容後再傳送", changed.join("、")),
+    ))
 }
 
 /// The post as it will go out, so whoever confirms reads the text itself rather than
@@ -360,6 +425,9 @@ fn send(args: Args, record: &mut SendRecord) -> Result<(String, String), Failure
     record.target = target.to_string();
     let outgoing = compose(read_message(&args)?, args.code, read_attachments(&args.attach)?)?;
     record.summary = summarize(&outgoing);
+    if let Some(expected) = &args.confirm {
+        check_confirmation(expected, &confirmation_code(&target, &outgoing))?;
+    }
     let mut session = Session::load().map_err(|e| session_failure(e, &target))?;
     let recipient = with_retries(|| target.look_up(&mut session)).map_err(|e| session_failure(e, &target))?;
     let channel_id =
@@ -624,6 +692,27 @@ mod tests {
     fn missing_recipient_is_explained() {
         let error = command().try_get_matches_from(["mmsend", "訊息"]).expect_err("a recipient is required");
         assert!(usage_failure(&error).message.starts_with("請指定收件對象"));
+    }
+
+    #[test]
+    fn confirmation_code_names_what_changed_since_the_dry_run() {
+        let alice = Target::User("alice".into());
+        let text = |message: &str, code: bool| {
+            compose(Some(message.into()), code, Vec::new()).unwrap_or_else(|f| panic!("{}", f.message))
+        };
+        let approved = confirmation_code(&alice, &text("報表跑完了", false));
+        assert!(check_confirmation(&approved.to_uppercase(), &approved).is_ok());
+        let refusal = |actual: String| check_confirmation(&approved, &actual).err().map(|f| f.message).unwrap_or_default();
+        assert!(refusal(confirmation_code(&Target::User("bob".into()), &text("報表跑完了", false))).starts_with("收件對象和"));
+        // Same words, shown differently.
+        assert!(refusal(confirmation_code(&alice, &text("報表跑完了", true))).starts_with("訊息內容和"));
+        let attached = Outgoing {
+            message: "報表跑完了".into(),
+            files: vec![Attachment { name: "日報.xlsx".into(), bytes: b"1".to_vec() }],
+        };
+        assert!(refusal(confirmation_code(&alice, &attached)).starts_with("附件和"));
+        let malformed = check_confirmation("3f9a", &approved).err().map(|f| f.message).unwrap_or_default();
+        assert!(malformed.contains("格式不對"));
     }
 
     #[test]
