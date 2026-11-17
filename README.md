@@ -44,6 +44,7 @@ AI  ▸ mmsend --user alice "報表跑完了"
 - 👀 **先試跑、再傳送**：`--dry-run` 列出收件人姓名與訊息全文，你說好才送出。
 - 🔎 **找人不用猜**：`mmsend find 王小明` 每一行開頭就是傳送要用的參數。
 - ↩️ **傳錯收得回**：`mmsend delete --last` 刪掉剛傳的那則。
+- 💬 **讀得到回覆**：`mmsend replies <訊息ID>` 列出對方回的訊息，截圖等附件直接下載好；只查得到自己傳的那則。
 - 🧾 **好判讀**：成功印一行在 stdout，失敗印在 stderr 並寫下一步該做什麼；結束代碼分類清楚。
 
 ## 開始使用
@@ -93,6 +94,7 @@ mmsend find 王小明                  :: 找人員、頻道或別名
 mmsend --user alice --dry-run "訊息" :: 試跑：顯示收件人姓名與內容，不傳送
 mmsend alias set 值班 --user alice   :: 設定別名（mmsend alias 列出）
 mmsend delete --last                :: 刪除最近一次傳送的訊息（或 mmsend delete <訊息 ID>）
+mmsend replies <訊息ID>             :: 列出對方的回覆，附件存到暫存資料夾；還沒回覆時結束代碼 7
 ```
 
 - `--channel` 用網址裡的名稱：`https://chat.example.com/<團隊>/channels/<頻道>`。

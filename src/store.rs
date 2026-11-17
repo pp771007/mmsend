@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError};
+use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows_sys::Win32::Security::Credentials::{
     CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
     CredWriteW,
@@ -88,10 +90,7 @@ impl SendRecord {
             now
         };
         SendRecord {
-            time: format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond
-            ),
+            time: format_time(&now),
             target: String::new(),
             ok: false,
             detail: String::new(),
@@ -99,6 +98,35 @@ impl SendRecord {
             post_id: None,
         }
     }
+}
+
+fn format_time(time: &SYSTEMTIME) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
+    )
+}
+
+/// A server timestamp (milliseconds since 1970, UTC) as local time, in the send log's format.
+pub fn local_time(epoch_millis: i64) -> String {
+    /// FILETIME counts 100-nanosecond ticks from 1601-01-01.
+    const TICKS_TO_UNIX_EPOCH: i64 = 116_444_736_000_000_000;
+    const TICKS_PER_MILLI: i64 = 10_000;
+    let ticks = (epoch_millis * TICKS_PER_MILLI + TICKS_TO_UNIX_EPOCH) as u64;
+    let file_time = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    // SAFETY: both calls only read and fill the structs they are given; a null
+    // time zone means the PC's current one.
+    let local = unsafe {
+        let mut utc = std::mem::zeroed();
+        let mut local = std::mem::zeroed();
+        FileTimeToSystemTime(&file_time, &mut utc);
+        SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local);
+        local
+    };
+    format_time(&local)
 }
 
 pub fn append_send_record(record: &SendRecord) -> Result<(), String> {

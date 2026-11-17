@@ -10,13 +10,15 @@ use serde::{Deserialize, Serialize};
 
 const API_PATH: [&str; 2] = ["api", "v4"];
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-/// Attachments can be large and the uplink slow.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// Attachments, either way: they can be large and the link slow.
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
 /// Mattermost returns the session token of a password login in this response header.
 const SESSION_TOKEN_HEADER: &str = "Token";
 pub const USER_SEARCH_LIMIT: u32 = 50;
 /// Mattermost caps group messages at 8 members; 200 is the API's page maximum.
 const GROUP_MEMBER_LIMIT: &str = "200";
+/// The API's page maximum for posts.
+pub const POSTS_PER_PAGE: usize = 200;
 
 /// Mattermost's error ids for a login that needs, or got a wrong, two-step verification code.
 const MFA_REQUIRED_ID: &str = "mfa.validate_token.authenticate.app_error";
@@ -199,13 +201,44 @@ pub struct NewPost<'a> {
     pub file_ids: &'a [String],
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct Post {
     pub id: String,
     /// Who wrote it.
     pub user_id: String,
     #[serde(default)]
     pub message: String,
+    #[serde(default)]
+    pub channel_id: String,
+    /// Milliseconds since epoch.
+    #[serde(default)]
+    pub create_at: i64,
+    /// Empty for what a person wrote; `system_...` for "joined the channel" and the like.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub metadata: PostMetadata,
+}
+
+#[derive(Deserialize, Default)]
+pub struct PostMetadata {
+    #[serde(default)]
+    pub files: Vec<FileInfo>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct FileInfo {
+    pub id: String,
+    pub name: String,
+}
+
+/// A page of posts; `order` lists their ids.
+#[derive(Deserialize)]
+pub struct PostList {
+    #[serde(default)]
+    pub order: Vec<String>,
+    #[serde(default)]
+    pub posts: std::collections::HashMap<String, Post>,
 }
 
 #[derive(Deserialize)]
@@ -376,7 +409,7 @@ impl Client {
             .part("files", Part::bytes(bytes.to_vec()).file_name(name.to_owned()));
         let response: UploadResponse = send_json(
             self.request(Method::POST, &["files"])
-                .timeout(UPLOAD_TIMEOUT)
+                .timeout(TRANSFER_TIMEOUT)
                 .multipart(form),
         )?;
         response
@@ -397,6 +430,39 @@ impl Client {
     /// `Err(NotFound)` once deleted.
     pub fn post(&self, post_id: &str) -> Result<Post, ApiError> {
         send_json(self.request(Method::GET, &["posts", post_id]))
+    }
+
+    pub fn channel(&self, channel_id: &str) -> Result<Channel, ApiError> {
+        send_json(self.request(Method::GET, &["channels", channel_id]))
+    }
+
+    /// One page of the posts written after `post_id` in its channel, thread replies included.
+    pub fn posts_after(&self, channel_id: &str, post_id: &str, page: u32) -> Result<PostList, ApiError> {
+        let page = page.to_string();
+        let per_page = POSTS_PER_PAGE.to_string();
+        send_json(self.request_with_query(
+            Method::GET,
+            &["channels", channel_id, "posts"],
+            &[("after", post_id), ("page", &page), ("per_page", &per_page)],
+        ))
+    }
+
+    /// The post's thread: the post itself and every reply to it.
+    pub fn thread(&self, post_id: &str) -> Result<PostList, ApiError> {
+        send_json(self.request(Method::GET, &["posts", post_id, "thread"]))
+    }
+
+    /// An attachment's bytes.
+    pub fn download_file(&self, file_id: &str) -> Result<Vec<u8>, ApiError> {
+        let response = self
+            .request(Method::GET, &["files", file_id])
+            .timeout(TRANSFER_TIMEOUT)
+            .send()
+            .map_err(|e| ApiError::Network(error_chain(&e)))?;
+        check_status(response)?
+            .bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| ApiError::Network(error_chain(&e)))
     }
 
     pub fn delete_post(&self, post_id: &str) -> Result<(), ApiError> {

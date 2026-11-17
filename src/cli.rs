@@ -24,8 +24,9 @@ pub(crate) const EXIT_NOT_LOGGED_IN: u8 = 3;
 pub(crate) const EXIT_LOGIN_EXPIRED: u8 = 4;
 pub(crate) const EXIT_TARGET_NOT_FOUND: u8 = 5;
 pub(crate) const EXIT_SEND_FAILED: u8 = 6;
+pub(crate) const EXIT_NO_REPLIES: u8 = 7;
 
-const EXIT_CODES: [(u8, &str); 7] = [
+const EXIT_CODES: [(u8, &str); 8] = [
     (0, "成功"),
     (EXIT_OTHER, "其他錯誤"),
     (EXIT_USAGE, "參數錯誤或訊息為空"),
@@ -33,6 +34,7 @@ const EXIT_CODES: [(u8, &str); 7] = [
     (EXIT_LOGIN_EXPIRED, "登入已失效（密碼已變更、權杖被撤銷等）"),
     (EXIT_TARGET_NOT_FOUND, "找不到收件對象，或無權限"),
     (EXIT_SEND_FAILED, "連線或伺服器錯誤"),
+    (EXIT_NO_REPLIES, "還沒有回覆（mmsend replies）"),
 ];
 
 /// Waits before the second and third attempt when the network or server hiccups
@@ -76,6 +78,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend find <關鍵字>                  以姓名、帳號或頻道名稱尋找收件對象
   mmsend alias                          列出或設定別名（mmsend alias -h）
   mmsend delete <訊息ID>                刪除自己傳的訊息；--last 刪除最近一則
+  mmsend replies <訊息ID>               列出對方的回覆，附件存到暫存資料夾
   mmsend                                開啟設定視窗
 
 參數：
@@ -246,6 +249,7 @@ pub fn run() -> ExitCode {
         Some(subcommands::INSTALL) => return report(subcommands::install()),
         Some(subcommands::UPDATE) => return report(subcommands::update()),
         Some(subcommands::DELETE) => return report(subcommands::delete()),
+        Some(subcommands::REPLIES) => return report(subcommands::replies()),
         _ => {}
     }
     let mut record = SendRecord::starting_now();
