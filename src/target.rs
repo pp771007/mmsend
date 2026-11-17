@@ -205,7 +205,10 @@ pub fn command_line(program: &str, args: &str, kind: TemplateKind, message: &str
 /// a `"` is written `""`, which mmsend reads as one quote and which keeps cmd inside
 /// the quoted text so `&` `|` `>` stay text; backslashes right before a quote,
 /// the closing one included, are doubled so they do not escape it.
-/// `%` is left as typed. The window's message field is single-line, so no newline.
+/// `%` is written `%%`, which a batch file reads as one `%` instead of expanding a
+/// variable; pasted at a cmd prompt it stays `%%`, but scripts are what the copied
+/// command is for, and the window sends a one-off message itself.
+/// The window's message field is single-line, so no newline.
 fn quote_argument(text: &str) -> String {
     let mut quoted = String::from('"');
     let mut backslashes = 0;
@@ -215,6 +218,11 @@ fn quote_argument(text: &str) -> String {
             '"' => {
                 quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
                 quoted.push_str("\"\"");
+                backslashes = 0;
+            }
+            '%' => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes));
+                quoted.push_str("%%");
                 backslashes = 0;
             }
             c => {
@@ -269,11 +277,11 @@ mod tests {
     }
 
     #[test]
-    fn quotes_and_trailing_backslashes_survive_cmd_and_argument_parsing() {
+    fn quotes_percents_and_trailing_backslashes_survive_a_batch_file() {
         let args = Target::User("alice".into()).cli_args();
         assert_eq!(
-            command_line("mmsend", &args, TemplateKind::Inline, r#"he said "hi" & left \"x\" C:\out\"#),
-            r#"mmsend --user alice "he said ""hi"" & left \\""x\\"" C:\out\\""#
+            command_line("mmsend", &args, TemplateKind::Inline, r#"he said "hi" & 100% at %TEMP% \"x\" C:\out\"#),
+            r#"mmsend --user alice "he said ""hi"" & 100%% at %%TEMP%% \\""x\\"" C:\out\\""#
         );
     }
 
