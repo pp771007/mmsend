@@ -40,7 +40,7 @@ if ((Get-FileHash "$dir\mmsend.exe" -Algorithm SHA256).Hash -ne $expected) { thr
 
 ## 2. 登入
 
-`status` 結束代碼 3（尚未登入）或 4（密碼已變更）時，登入視窗只會出現在這台電腦的螢幕上。
+`status` 結束代碼 3（尚未登入）或 4（登入已失效）時，登入視窗只會出現在這台電腦的螢幕上。
 使用者不在電腦前（例如從 Telegram 或手機下指令）→ 告訴他回到電腦前才能登入，先不執行。
 在電腦前 → 先告訴他「畫面上會跳出 Mattermost 登入視窗，請登入」，再執行：
 
