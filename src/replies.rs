@@ -33,6 +33,10 @@ const SYSTEM_POST_PREFIX: &str = "system_";
 /// How often --wait asks again: an answer is noticed within half a minute, and a
 /// day of waiting is under 3000 light requests.
 const WAIT_INTERVAL: Duration = Duration::from_secs(30);
+/// Once something comes back, --wait goes on until this long passes with nothing
+/// new: people answer in chat as several messages ("let me check" … "works" +
+/// a screenshot), and acting on the first one alone would miss the answer.
+const QUIET_PERIOD: Duration = Duration::from_secs(60);
 const MAX_WAIT_MINUTES: u64 = 24 * 60;
 const SECONDS_PER_MINUTE: u64 = 60;
 
@@ -74,7 +78,7 @@ struct RepliesArgs {
     #[arg(long, value_name = "帳號,帳號")]
     group: Option<String>,
 
-    /// 還沒有回覆時最多等幾分鐘，一有回覆就結束（適合在背景執行）
+    /// 最多等幾分鐘；有回覆後再 1 分鐘沒有新訊息就結束（適合在背景執行）
     #[arg(long, value_name = "分鐘", value_parser = clap::value_parser!(u64).range(1..=MAX_WAIT_MINUTES))]
     wait: Option<u64>,
 
@@ -96,6 +100,12 @@ struct Answers {
 impl Answers {
     fn is_empty(&self) -> bool {
         self.reactions.is_empty() && self.replies.is_empty()
+    }
+
+    /// Whether anything came or went since `earlier`.
+    fn same_as(&self, earlier: &Answers) -> bool {
+        let ids = |answers: &Answers| answers.replies.iter().map(|reply| reply.id.clone()).collect::<Vec<_>>();
+        ids(self) == ids(earlier) && self.reactions.len() == earlier.reactions.len()
     }
 }
 
@@ -124,8 +134,11 @@ pub fn replies() -> Result<String, Failure> {
         .wait
         .map(|minutes| Instant::now() + Duration::from_secs(minutes * SECONDS_PER_MINUTE));
     loop {
-        let answers = gather(&mut session, &mine.id, &channel, &me)?;
+        let mut answers = gather(&mut session, &mine.id, &channel, &me)?;
         if !answers.is_empty() {
+            if let Some(deadline) = deadline {
+                answers = until_quiet(&mut session, answers, deadline, &channel, &me)?;
+            }
             return Ok(render(&mut session, &answers, &channel, &me));
         }
         match deadline {
@@ -214,6 +227,28 @@ fn last_own_post(session: &mut Session, channel_id: &str, me: &str) -> Result<Op
         }
     }
     Ok(None)
+}
+
+/// Asks again until QUIET_PERIOD passes with nothing new, or the wait is over.
+fn until_quiet(
+    session: &mut Session,
+    mut answers: Answers,
+    deadline: Instant,
+    channel: &Channel,
+    me: &str,
+) -> Result<Answers, Failure> {
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(answers);
+        }
+        std::thread::sleep(QUIET_PERIOD.min(deadline - now));
+        let latest = gather(session, &answers.mine.id, channel, me)?;
+        if latest.same_as(&answers) {
+            return Ok(latest);
+        }
+        answers = latest;
+    }
 }
 
 /// Asks again from scratch: --wait calls this every WAIT_INTERVAL.
