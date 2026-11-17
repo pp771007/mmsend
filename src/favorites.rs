@@ -76,6 +76,18 @@ pub fn set_alias(list: &mut Vec<Favorite>, pin: Favorite, alias: &str) -> Option
     None
 }
 
+/// Clears `alias` from whichever other pin holds it, so `own` can take it: following a
+/// new on-call person is what an alias is for. Returns who it was taken from.
+pub fn release_alias(list: &mut [Favorite], alias: &str, own: &Target) -> Option<Target> {
+    let wanted = alias.to_lowercase();
+    list.iter_mut()
+        .find(|f| &f.target != own && !f.alias.is_empty() && f.alias.to_lowercase() == wanted)
+        .map(|f| {
+            f.alias.clear();
+            f.target.clone()
+        })
+}
+
 /// Aliases are matched without regard to case.
 pub fn find_alias<'a>(favorites: &'a [Favorite], alias: &str) -> Option<&'a Favorite> {
     let wanted = alias.to_lowercase();

@@ -425,13 +425,7 @@ pub fn alias() -> Result<String, Failure> {
             let target = parse_target(&target)?;
             // The point of an alias is following a new person without editing scripts,
             // so taking it over is the normal case, not a conflict.
-            let previous = favorites
-                .iter_mut()
-                .find(|f| f.target != target && !f.alias.is_empty() && f.alias.to_lowercase() == alias.to_lowercase())
-                .map(|f| {
-                    f.alias.clear();
-                    f.target.to_string()
-                });
+            let previous = favorites::release_alias(&mut favorites, &alias, &target);
             if let Some(problem) = favorites::alias_problem(&alias, &favorites, &target) {
                 return Err(Failure::new(EXIT_USAGE, problem));
             }

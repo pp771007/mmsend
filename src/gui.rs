@@ -71,6 +71,9 @@ const ALIAS_TAG_PADDING: Vec2 = vec2(6.0, 1.0);
 const ALIAS_TAG_GAP: f32 = 8.0;
 /// Fits the icon and 已釘選.
 const PIN_BUTTON_WIDTH: f32 = 92.0;
+/// Lines the alias-held pin state up with where the pin button's label sits.
+const PIN_STATE_INSET: f32 = 10.0;
+const PIN_STATE_FONT_SIZE: f32 = 13.5;
 const RECIPIENT_CARD_PADDING: i8 = 10;
 const DIRECTORY_WIDTH: f32 = 340.0;
 /// Icon and line of the "pick someone" state, to centre it vertically.
@@ -660,13 +663,20 @@ struct MainView {
     favorites: Vec<Favorite>,
     /// The alias field of the selected pin, as typed (it may not be valid yet).
     alias_draft: String,
-    alias_error: Option<String>,
+    alias_issue: Option<AliasIssue>,
+}
+
+/// Why the alias typed in the field was not saved.
+enum AliasIssue {
+    Invalid(String),
+    /// Another recipient (this title) holds it; the window offers to move it here.
+    TakenBy(String),
 }
 
 impl MainView {
     fn select(&mut self, entry: Entry) {
         self.alias_draft = self.alias_of(&entry.target).unwrap_or_default().to_owned();
-        self.alias_error = None;
+        self.alias_issue = None;
         self.selected = Some(entry);
         self.focus_message = true;
         self.copied_at = None;
@@ -925,7 +935,7 @@ impl App {
             send_error: None,
             favorites,
             alias_draft: String::new(),
-            alias_error: None,
+            alias_issue: None,
         }));
     }
 
@@ -963,7 +973,7 @@ impl App {
                 view.favorites = list;
                 if let Some(entry) = &view.selected {
                     view.alias_draft = view.alias_of(&entry.target).unwrap_or_default().to_owned();
-                    view.alias_error = None;
+                    view.alias_issue = None;
                 }
             }
             Err(e) => self.toast = Some(Toast::new(ToastKind::Error, e)),
@@ -1272,7 +1282,7 @@ fn logout_dialog(ctx: &egui::Context, p: &Palette) -> Option<bool> {
             ui.label(RichText::new("登出").size(17.0).strong().color(p.text));
         });
         ui.add_space(10.0);
-        ui.label(RichText::new("登出後，批次檔與排程都無法傳送，直到重新登入。").color(p.danger));
+        notice(ui, Icon::Warning, "登出後，批次檔與排程都無法傳送，直到重新登入", p.danger, p.danger_soft);
         ui.add_space(16.0);
         let half = vec2((ui.available_width() - ui.spacing().item_spacing.x) / 2.0, CONTROL_HEIGHT);
         ui.horizontal(|ui| {
@@ -1309,7 +1319,8 @@ fn uninstall_dialog(ctx: &egui::Context, step: UninstallStep, p: &Palette) -> Op
             return;
         }
         ui.label(RichText::new("移除 mmsend 指令、開始功能表捷徑與登入資料。").color(p.text));
-        ui.label(RichText::new("已寫好的批次檔將無法再傳送訊息。").color(p.danger));
+        ui.add_space(8.0);
+        notice(ui, Icon::Warning, "已寫好的批次檔將無法再傳送訊息", p.danger, p.danger_soft);
         ui.add_space(16.0);
         let running = step == UninstallStep::Running;
         let half = vec2((width - ui.spacing().item_spacing.x) / 2.0, CONTROL_HEIGHT);
@@ -2358,14 +2369,21 @@ fn composer(
                 vec2(ui.available_width(), ICON_BUTTON_SIZE),
                 Layout::right_to_left(Align::Center),
                 |ui| {
-                    let (icon, label, tip) = match (pinned, has_alias) {
-                        (None, _) => (Icon::Pin, "釘選", "釘選到清單最上方"),
-                        (Some(_), false) => (Icon::Pinned, "已釘選", "取消釘選"),
-                        (Some(_), true) => (Icon::Pinned, "已釘選", "請先清除別名再取消釘選"),
-                    };
-                    let size = vec2(PIN_BUTTON_WIDTH, ICON_BUTTON_SIZE);
-                    if button(ui, ButtonKind::Ghost, Some(icon), label, size, !has_alias, Some(tip)).clicked() {
-                        toggle_pin = true;
+                    if has_alias {
+                        // A state, not a button: what holds the pin is the alias field below.
+                        ui.add_space(PIN_STATE_INSET);
+                        ui.label(RichText::new("因別名釘選").size(PIN_STATE_FONT_SIZE).color(p.text_weak))
+                            .on_hover_text("清除別名後可取消釘選");
+                        paint_icon(ui, Icon::Pinned, BUTTON_ICON_SIZE, p.text_weak, p.background);
+                    } else {
+                        let (icon, label, tip) = match pinned {
+                            None => (Icon::Pin, "釘選", "釘選到清單最上方"),
+                            Some(_) => (Icon::Pinned, "已釘選", "取消釘選"),
+                        };
+                        let size = vec2(PIN_BUTTON_WIDTH, ICON_BUTTON_SIZE);
+                        if button(ui, ButtonKind::Ghost, Some(icon), label, size, true, Some(tip)).clicked() {
+                            toggle_pin = true;
+                        }
                     }
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                         let (rect, _) = ui.allocate_exact_size(Vec2::splat(SMALL_AVATAR_SIZE), Sense::hover());
@@ -2390,7 +2408,7 @@ fn composer(
             Err(e) => *action = Action::ShowError(e),
         }
         view.alias_draft = view.alias_of(&entry.target).unwrap_or_default().to_owned();
-        view.alias_error = None;
+        view.alias_issue = None;
     }
     ui.add_space(RECIPIENT_MESSAGE_GAP);
 
@@ -2451,19 +2469,47 @@ fn alias_field(ui: &mut egui::Ui, view: &mut MainView, entry: &Entry, p: &Palett
             .labelled_by(label);
         if field.changed() {
             let alias = view.alias_draft.trim().to_owned();
-            let pin = entry.pin();
-            let mut problem = None;
-            match favorites::update(|list| problem = favorites::set_alias(list, pin, &alias)) {
-                Ok(list) => view.favorites = list,
-                Err(e) => *action = Action::ShowError(e),
-            }
-            view.alias_error = problem;
-            view.copied_at = None;
-        }
-        if let Some(problem) = &view.alias_error {
-            ui.add(Label::new(RichText::new(problem).size(12.5).color(p.danger)).wrap());
+            save_alias(view, entry, &alias, false, action);
         }
     });
+    let alias = view.alias_draft.trim().to_owned();
+    match &view.alias_issue {
+        None => {}
+        Some(AliasIssue::Invalid(problem)) => {
+            ui.add_space(6.0);
+            notice(ui, Icon::Warning, problem, p.danger, p.danger_soft);
+        }
+        Some(AliasIssue::TakenBy(holder)) => {
+            let text = format!("「{alias}」目前是 {holder} 的別名");
+            let take = banner(ui, p, Icon::Pinned, "改給這位", true, None, |ui| {
+                ui.add(Label::new(RichText::new(text).color(p.text)).wrap());
+            });
+            if take {
+                save_alias(view, entry, &alias, true, action);
+            }
+        }
+    }
+}
+
+/// `take_over`: move the alias here from whoever holds it, as `mmsend alias set` does.
+fn save_alias(view: &mut MainView, entry: &Entry, alias: &str, take_over: bool, action: &mut Action) {
+    let pin = entry.pin();
+    let mut problem = None;
+    let saved = favorites::update(|list| {
+        if take_over {
+            favorites::release_alias(list, alias, &entry.target);
+        }
+        problem = favorites::set_alias(list, pin, alias);
+    });
+    match saved {
+        Ok(list) => view.favorites = list,
+        Err(e) => *action = Action::ShowError(e),
+    }
+    view.alias_issue = problem.map(|problem| match favorites::find_alias(&view.favorites, alias) {
+        Some(holder) if holder.target != entry.target => AliasIssue::TakenBy(holder.title.clone()),
+        _ => AliasIssue::Invalid(problem),
+    });
+    view.copied_at = None;
 }
 
 /// The command, and the two things to do with it: copy it, or send the message now.
