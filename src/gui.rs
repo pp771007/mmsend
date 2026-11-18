@@ -143,6 +143,7 @@ pub fn run() -> ExitCode {
     if !cfg!(debug_assertions) && matches!(install::state(), InstallState::Newer(_)) && install::launch_installed().is_ok() {
         return ExitCode::SUCCESS;
     }
+    install::remove_replaced_copies();
     match open_window(None) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

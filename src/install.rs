@@ -20,6 +20,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// commands on PATH cannot shadow each other.
 pub const COMMAND_NAME: &str = if cfg!(debug_assertions) { "mmsend-dev" } else { "mmsend" };
 const EXE_NAME: &str = if cfg!(debug_assertions) { "mmsend-dev.exe" } else { "mmsend.exe" };
+/// In the temp folder, followed by a process id: the installed copy moved aside by
+/// `replace_file`. Neither prefix starts the other, so a debug build and the released
+/// copy each clean up only their own.
+const REPLACED_PREFIX: &str = if cfg!(debug_assertions) { "mmsend-dev-replaced-" } else { "mmsend-replaced-" };
 const ENVIRONMENT_KEY: &str = "Environment";
 const PATH_VALUE: &str = "Path";
 const BROADCAST_TIMEOUT_MS: u32 = 5000;
@@ -218,7 +222,8 @@ pub fn install_from(exe: &Path) -> Result<(), String> {
 /// will not overwrite a running exe; it does let it be renamed. So the old copy moves
 /// aside first, and comes back if the new one cannot be written.
 fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
-    let parked = std::env::temp_dir().join(format!("{COMMAND_NAME}-replaced-{}.exe", std::process::id()));
+    remove_replaced_copies();
+    let parked = std::env::temp_dir().join(format!("{REPLACED_PREFIX}{}.exe", std::process::id()));
     let moved_aside = if target.exists() {
         move_with_retries(target, &parked)
             .map_err(|e| format!("無法替換 {}（檔案正被使用，請稍後再試）：{e}", target.display()))?;
@@ -232,6 +237,21 @@ fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
         }
         format!("無法寫入 {}：{e}", target.display())
     })
+}
+
+/// Deletes the old copies `replace_file` moved aside. One still running cannot be
+/// deleted yet (Windows refuses), so it is left for the next window or install.
+pub fn remove_replaced_copies() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(REPLACED_PREFIX) && name.ends_with(".exe") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// A freshly written exe is held for a moment by the antivirus scan, during which
