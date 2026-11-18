@@ -166,7 +166,8 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 選項：
 {options}";
 
-const NO_ARGUMENTS_HELP_TEMPLATE: &str = "\
+/// For the commands without positional arguments, which would leave 參數： empty.
+pub(crate) const OPTIONS_ONLY_HELP_TEMPLATE: &str = "\
 {about}
 
 用法：
@@ -189,7 +190,7 @@ fn no_arguments_in(
     let command = clap::Command::new(name)
         .about(about)
         .override_usage(format!("mmsend {name}"))
-        .help_template(NO_ARGUMENTS_HELP_TEMPLATE)
+        .help_template(OPTIONS_ONLY_HELP_TEMPLATE)
         .no_binary_name(true)
         .disable_help_flag(true)
         .arg(clap::Arg::new("help").short('h').long("help").action(ArgAction::Help).help("顯示說明"));

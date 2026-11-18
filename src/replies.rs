@@ -29,7 +29,7 @@ const MAX_SCANNED_POSTS: usize = 1000;
 /// Mattermost ids are 26 letters and digits.
 const POST_ID_LENGTH: usize = 26;
 /// Join-and-leave notices and the like, which nobody wrote.
-const SYSTEM_POST_PREFIX: &str = "system_";
+pub(crate) const SYSTEM_POST_PREFIX: &str = "system_";
 /// How often --wait asks again: an answer is noticed within half a minute, and a
 /// day of waiting is under 3000 light requests.
 const WAIT_INTERVAL: Duration = Duration::from_secs(30);
@@ -285,7 +285,7 @@ fn posts_after(session: &mut Session, mine: &Post) -> Result<(Vec<PostList>, boo
 
 /// A page's posts in its `order`. Its `posts` also carries the thread starters of
 /// its replies, which can be older than the page, so only `order` counts.
-fn in_order(mut list: PostList) -> impl Iterator<Item = Post> {
+pub(crate) fn in_order(mut list: PostList) -> impl Iterator<Item = Post> {
     let order = std::mem::take(&mut list.order);
     order.into_iter().filter_map(move |id| list.posts.remove(&id))
 }
@@ -376,7 +376,7 @@ fn render(session: &mut Session, answers: &Answers, channel: &Channel, me: &str)
 }
 
 /// Saves an attachment under `folder`; two with the same name keep both.
-fn save_attachment(
+pub(crate) fn save_attachment(
     session: &mut Session,
     folder: &Path,
     file: &FileInfo,

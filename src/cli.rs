@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::APP_NAME;
 use crate::api::{ApiError, NewPost};
 use crate::console;
+use crate::read;
 use crate::replies;
 use crate::favorites;
 use crate::session::{Error, Session};
@@ -86,6 +87,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend alias                          列出或設定別名（mmsend alias -h）
   mmsend delete <訊息ID>                刪除自己傳的訊息；--last 刪除最近一則
   mmsend replies <訊息ID>               列出對方的回覆與表情回應（mmsend replies -h）
+  mmsend read --user <帳號>             列出與對方最近的訊息，雙方的都列（mmsend read -h）
   mmsend                                開啟設定視窗
 
 參數：
@@ -261,6 +263,7 @@ pub fn run() -> ExitCode {
         Some(subcommands::UPDATE) => return report(subcommands::update()),
         Some(subcommands::DELETE) => return report(subcommands::delete()),
         Some(replies::REPLIES) => return report(replies::replies()),
+        Some(read::READ) => return report(read::read()),
         _ => {}
     }
     let mut record = SendRecord::starting_now();
