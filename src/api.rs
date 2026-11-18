@@ -235,6 +235,13 @@ pub struct PostMetadata {
     pub reactions: Vec<Reaction>,
 }
 
+#[derive(Serialize)]
+struct NewReaction<'a> {
+    user_id: &'a str,
+    post_id: &'a str,
+    emoji_name: &'a str,
+}
+
 #[derive(Deserialize, Clone)]
 pub struct Reaction {
     pub user_id: String,
@@ -484,6 +491,18 @@ impl Client {
 
     pub fn delete_post(&self, post_id: &str) -> Result<(), ApiError> {
         send_json::<IgnoredAny>(self.request(Method::DELETE, &["posts", post_id])).map(|_| ())
+    }
+
+    /// `emoji_name` as Mattermost names it: `+1`, not `:+1:` or 👍. Adding one already
+    /// there succeeds.
+    pub fn add_reaction(&self, user_id: &str, post_id: &str, emoji_name: &str) -> Result<(), ApiError> {
+        let body = NewReaction { user_id, post_id, emoji_name };
+        send_json::<IgnoredAny>(self.request(Method::POST, &["reactions"]).json(&body)).map(|_| ())
+    }
+
+    pub fn remove_reaction(&self, user_id: &str, post_id: &str, emoji_name: &str) -> Result<(), ApiError> {
+        let path = ["users", user_id, "posts", post_id, "reactions", emoji_name];
+        send_json::<IgnoredAny>(self.request(Method::DELETE, &path)).map(|_| ())
     }
 
     fn request(&self, method: Method, path: &[&str]) -> RequestBuilder {

@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::APP_NAME;
 use crate::api::{ApiError, NewPost, Post};
 use crate::console;
+use crate::react;
 use crate::read;
 use crate::replies;
 use crate::favorites;
@@ -89,6 +90,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend delete <訊息ID>                刪除自己傳的訊息；--last 刪除最近一則
   mmsend replies <訊息ID>               列出對方的回覆與表情回應（mmsend replies -h）
   mmsend read --user <帳號>             列出與對方最近的訊息，雙方的都列（mmsend read -h）
+  mmsend react --user <帳號> +1         對對方最後一則按表情（mmsend react -h）
   mmsend                                開啟設定視窗
 
 參數：
@@ -269,6 +271,7 @@ pub fn run() -> ExitCode {
         Some(subcommands::DELETE) => return report(subcommands::delete()),
         Some(replies::REPLIES) => return report(replies::replies()),
         Some(read::READ) => return report(read::read()),
+        Some(react::REACT) => return report(react::react()),
         _ => {}
     }
     let mut record = SendRecord::starting_now();
@@ -338,7 +341,7 @@ fn dry_run(args: &Args) -> Result<String, Failure> {
         // answered is in it, so the dry run sends and creates nothing then.
         let channel_id =
             with_retries(|| recipient.channel_id(&mut session)).map_err(|e| session_failure(e, &target))?;
-        let post = replied_post(&mut session, reply, Some(&channel_id), &recipient.label)?;
+        let post = post_in_conversation(&mut session, reply, &channel_id, &recipient.label)?;
         lines.push(format!("回覆：{}", describe_post(&mut session, &post)));
     }
     if !outgoing.message.is_empty() {
@@ -455,7 +458,7 @@ fn send(args: Args, record: &mut SendRecord) -> Result<(String, String), Failure
         with_retries(|| recipient.channel_id(&mut session)).map_err(|e| session_failure(e, &target))?;
     let root_id = match &args.reply {
         Some(reply) => {
-            let post = replied_post(&mut session, reply, Some(&channel_id), &recipient.label)?;
+            let post = post_in_conversation(&mut session, reply, &channel_id, &recipient.label)?;
             if post.root_id.is_empty() { post.id } else { post.root_id }
         }
         None => String::new(),
@@ -480,12 +483,18 @@ fn send(args: Args, record: &mut SendRecord) -> Result<(String, String), Failure
     Ok((to, sent.id))
 }
 
-/// The message a --reply answers. It must be in the conversation named, so an id
-/// cannot post into, or in a dry run show, any other conversation the account can see.
-fn replied_post(session: &mut Session, reply: &str, channel_id: Option<&str>, label: &str) -> Result<Post, Failure> {
-    let post_id = replies::checked_post_id(reply)?;
+/// A message given by id to answer (--reply) or react to (`react --id`). It must be in
+/// the conversation named, so an id cannot act on, or in a dry run show, any other
+/// conversation the account can see.
+pub(crate) fn post_in_conversation(
+    session: &mut Session,
+    post_id: &str,
+    channel_id: &str,
+    label: &str,
+) -> Result<Post, Failure> {
+    let post_id = replies::checked_post_id(post_id)?;
     let post = replies::fetch_post(session, &post_id)?;
-    if channel_id != Some(post.channel_id.as_str()) {
+    if post.channel_id != channel_id {
         return Err(Failure::new(
             EXIT_TARGET_NOT_FOUND,
             format!("訊息 {post_id} 不在與 {label} 的對話裡：請用 mmsend read 列出的訊息 ID"),
@@ -495,8 +504,8 @@ fn replied_post(session: &mut Session, reply: &str, channel_id: Option<&str>, la
 }
 
 /// `2026-11-18 15:19:04 @alice 王小明「報表的數字怪怪的」`, for the dry run to show
-/// which message is answered.
-fn describe_post(session: &mut Session, post: &Post) -> String {
+/// which message is meant.
+pub(crate) fn describe_post(session: &mut Session, post: &Post) -> String {
     let author = if post.user_id == session.config.user_id {
         read::ME_LABEL.to_owned()
     } else {
