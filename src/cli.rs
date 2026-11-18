@@ -10,7 +10,7 @@ use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
 use sha2::{Digest, Sha256};
 
 use crate::APP_NAME;
-use crate::api::{ApiError, NewPost};
+use crate::api::{ApiError, NewPost, Post};
 use crate::console;
 use crate::read;
 use crate::replies;
@@ -78,6 +78,7 @@ const HELP_TEMPLATE: &str = "\
   mmsend --to <別名> \"訊息\"             傳送給在設定視窗取的別名
   mmsend --user <帳號> --file 訊息.txt  從文字檔讀取訊息（適用於多行或含雙引號）
   mmsend --user <帳號> --attach <檔案>  附加檔案，可同時加上訊息
+  mmsend --user <帳號> --reply <ID>     回覆某一則訊息（ID 由 mmsend read 列出）
   <其他指令> | mmsend --user <帳號>     傳送其他指令的輸出
   mmsend install                        安裝：之後在新開的視窗可直接輸入 mmsend
   mmsend update                         更新至最新版本
@@ -131,6 +132,10 @@ struct Args {
     /// 以程式碼區塊傳送，保留指令輸出的對齊
     #[arg(long)]
     code: bool,
+
+    /// 回覆這則訊息（傳到它的討論串）；ID 由 mmsend read 列出，收件對象要指定它所在的對話
+    #[arg(long, value_name = "訊息ID")]
+    reply: Option<String>,
 
     /// 試跑：檢查收件對象（顯示姓名）與內容，不傳送；最後一行是確認碼
     #[arg(long)]
@@ -312,7 +317,7 @@ pub fn run() -> ExitCode {
 fn dry_run(args: &Args) -> Result<String, Failure> {
     let target = parse_target(&args.target)?;
     let outgoing = compose(read_message(args)?, args.code, read_attachments(&args.attach)?)?;
-    let code = confirmation_code(&target, &outgoing);
+    let code = confirmation_code(&target, args.reply.as_deref(), &outgoing);
     if let Some(expected) = &args.confirm {
         check_confirmation(expected, &code)?;
     }
@@ -328,6 +333,14 @@ fn dry_run(args: &Args) -> Result<String, Failure> {
         "試跑，未傳送".to_owned(),
         format!("收件對象：{}", recipient.label),
     ];
+    if let Some(reply) = &args.reply {
+        // Opening a direct or group channel only looks it up when the message
+        // answered is in it, so the dry run sends and creates nothing then.
+        let channel_id =
+            with_retries(|| recipient.channel_id(&mut session)).map_err(|e| session_failure(e, &target))?;
+        let post = replied_post(&mut session, reply, Some(&channel_id), &recipient.label)?;
+        lines.push(format!("回覆：{}", describe_post(&mut session, &post)));
+    }
     if !outgoing.message.is_empty() {
         lines.push("內容：".to_owned());
         lines.extend(preview_lines(&outgoing.message));
@@ -343,7 +356,12 @@ fn dry_run(args: &Args) -> Result<String, Failure> {
 /// `1a2b-3c4d-5e6f`, one short hash per CONFIRM_PARTS entry, so that a refused send
 /// can say what changed. Taken from the post as it will go out, so an option that
 /// changes what the recipient sees (--code, a too-long text sent as a file) counts.
-fn confirmation_code(target: &Target, outgoing: &Outgoing) -> String {
+fn confirmation_code(target: &Target, reply: Option<&str>, outgoing: &Outgoing) -> String {
+    // Which message is answered is part of where the post goes.
+    let mut destination = target.to_string();
+    if let Some(reply) = reply {
+        destination.push_str(&format!(" --reply {}", reply.trim()));
+    }
     let mut files = Sha256::new();
     for file in &outgoing.files {
         files.update(file.name.as_bytes());
@@ -351,7 +369,7 @@ fn confirmation_code(target: &Target, outgoing: &Outgoing) -> String {
         files.update(&file.bytes);
     }
     let parts = [
-        Sha256::digest(target.to_string().as_bytes()),
+        Sha256::digest(destination.as_bytes()),
         Sha256::digest(outgoing.message.as_bytes()),
         files.finalize(),
     ];
@@ -429,12 +447,19 @@ fn send(args: Args, record: &mut SendRecord) -> Result<(String, String), Failure
     let outgoing = compose(read_message(&args)?, args.code, read_attachments(&args.attach)?)?;
     record.summary = summarize(&outgoing);
     if let Some(expected) = &args.confirm {
-        check_confirmation(expected, &confirmation_code(&target, &outgoing))?;
+        check_confirmation(expected, &confirmation_code(&target, args.reply.as_deref(), &outgoing))?;
     }
     let mut session = Session::load().map_err(|e| session_failure(e, &target))?;
     let recipient = with_retries(|| target.look_up(&mut session)).map_err(|e| session_failure(e, &target))?;
     let channel_id =
         with_retries(|| recipient.channel_id(&mut session)).map_err(|e| session_failure(e, &target))?;
+    let root_id = match &args.reply {
+        Some(reply) => {
+            let post = replied_post(&mut session, reply, Some(&channel_id), &recipient.label)?;
+            if post.root_id.is_empty() { post.id } else { post.root_id }
+        }
+        None => String::new(),
+    };
     let mut file_ids = Vec::with_capacity(outgoing.files.len());
     for file in &outgoing.files {
         let id = with_retries(|| session.call(|c| c.upload_file(&channel_id, &file.name, &file.bytes)))
@@ -447,10 +472,48 @@ fn send(args: Args, record: &mut SendRecord) -> Result<(String, String), Failure
         message: &outgoing.message,
         pending_post_id: &pending_post_id,
         file_ids: &file_ids,
+        root_id: &root_id,
     };
     let sent =
         with_retries(|| session.call(|c| c.create_post(&post))).map_err(|e| session_failure(e, &target))?;
-    Ok((recipient.label, sent.id))
+    let to = if root_id.is_empty() { recipient.label } else { format!("{} 的討論串", recipient.label) };
+    Ok((to, sent.id))
+}
+
+/// The message a --reply answers. It must be in the conversation named, so an id
+/// cannot post into, or in a dry run show, any other conversation the account can see.
+fn replied_post(session: &mut Session, reply: &str, channel_id: Option<&str>, label: &str) -> Result<Post, Failure> {
+    let post_id = replies::checked_post_id(reply)?;
+    let post = replies::fetch_post(session, &post_id)?;
+    if channel_id != Some(post.channel_id.as_str()) {
+        return Err(Failure::new(
+            EXIT_TARGET_NOT_FOUND,
+            format!("訊息 {post_id} 不在與 {label} 的對話裡：請用 mmsend read 列出的訊息 ID"),
+        ));
+    }
+    Ok(post)
+}
+
+/// `2026-11-18 15:19:04 @alice 王小明「報表的數字怪怪的」`, for the dry run to show
+/// which message is answered.
+fn describe_post(session: &mut Session, post: &Post) -> String {
+    let author = if post.user_id == session.config.user_id {
+        read::ME_LABEL.to_owned()
+    } else {
+        // Without the name it still reads; only who is shown by id.
+        with_retries(|| session.call(|c| c.users_by_ids(std::slice::from_ref(&post.user_id))))
+            .ok()
+            .and_then(|users| users.first().map(|user| user.label()))
+            .unwrap_or_else(|| post.user_id.clone())
+    };
+    let summary = summarize_text(&post.message);
+    let what = if summary.is_empty() {
+        let files: Vec<&str> = post.metadata.files.iter().map(|file| file.name.as_str()).collect();
+        format!("（附件 {}）", files.join("、"))
+    } else {
+        format!("「{summary}」")
+    };
+    format!("{} {author}{what}", store::local_time(post.create_at))
 }
 
 struct Attachment {
@@ -703,17 +766,22 @@ mod tests {
         let text = |message: &str, code: bool| {
             compose(Some(message.into()), code, Vec::new()).unwrap_or_else(|f| panic!("{}", f.message))
         };
-        let approved = confirmation_code(&alice, &text("報表跑完了", false));
+        let approved = confirmation_code(&alice, None, &text("報表跑完了", false));
         assert!(check_confirmation(&approved.to_uppercase(), &approved).is_ok());
         let refusal = |actual: String| check_confirmation(&approved, &actual).err().map(|f| f.message).unwrap_or_default();
-        assert!(refusal(confirmation_code(&Target::User("bob".into()), &text("報表跑完了", false))).starts_with("收件對象和"));
+        assert!(refusal(confirmation_code(&Target::User("bob".into()), None, &text("報表跑完了", false))).starts_with("收件對象和"));
+        // Answering a message, or a different one, is a different place to post.
+        let replying = confirmation_code(&alice, Some("abc"), &text("報表跑完了", false));
+        assert!(refusal(replying.clone()).starts_with("收件對象和"));
+        let other = confirmation_code(&alice, Some("xyz"), &text("報表跑完了", false));
+        assert!(check_confirmation(&replying, &other).is_err());
         // Same words, shown differently.
-        assert!(refusal(confirmation_code(&alice, &text("報表跑完了", true))).starts_with("訊息內容和"));
+        assert!(refusal(confirmation_code(&alice, None, &text("報表跑完了", true))).starts_with("訊息內容和"));
         let attached = Outgoing {
             message: "報表跑完了".into(),
             files: vec![Attachment { name: "日報.xlsx".into(), bytes: b"1".to_vec() }],
         };
-        assert!(refusal(confirmation_code(&alice, &attached)).starts_with("附件和"));
+        assert!(refusal(confirmation_code(&alice, None, &attached)).starts_with("附件和"));
         let malformed = check_confirmation("3f9a", &approved).err().map(|f| f.message).unwrap_or_default();
         assert!(malformed.contains("格式不對"));
     }

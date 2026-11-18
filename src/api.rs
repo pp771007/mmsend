@@ -199,6 +199,10 @@ pub struct NewPost<'a> {
     pub pending_post_id: &'a str,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     pub file_ids: &'a [String],
+    /// The thread's first post, to post into its thread; empty for a new post.
+    /// Mattermost takes only a thread's first post here, never a reply.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub root_id: &'a str,
 }
 
 #[derive(Deserialize, Default)]

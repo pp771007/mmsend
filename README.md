@@ -45,7 +45,7 @@ AI  ▸ mmsend --user alice --confirm 5a1f-c8d6-e3b0 "報表跑完了"
 - 👀 **先試跑、再傳送**：`--dry-run` 列出收件人姓名與訊息全文，你說好才帶著它給的確認碼送出；內容在這之間被改過就送不出去。
 - 🔎 **找人不用猜**：`mmsend find 王小明` 每一行開頭就是傳送要用的參數。
 - ↩️ **傳錯收得回**：`mmsend delete --last` 刪掉剛傳的那則。
-- 📖 **先看前情再動手**：`mmsend read --user alice` 列出你們最近的對話（雙方的都有），附件直接下載好。只讀你指定的對象。
+- 📖 **先看前情再動手**：`mmsend read --user alice` 列出你們最近的對話（雙方的都有），附件直接下載好；要回其中某一句就加 `--reply <訊息ID>` 傳進它的討論串。只讀你指定的對象。
 - 💬 **讀得到回覆**：`mmsend replies` 列出對方的回覆與 👍 這類表情回應，截圖直接下載好；加 `--wait` 會等到對方回覆。只查得到自己傳的訊息。
 - 🧾 **好判讀**：成功印一行在 stdout，失敗印在 stderr 並寫下一步該做什麼；結束代碼分類清楚。
 
@@ -100,6 +100,7 @@ mmsend delete --last                :: 刪除最近一次傳送的訊息（或 m
 mmsend replies <訊息ID>             :: 對方的回覆與表情回應，附件存到暫存資料夾；還沒回覆時結束代碼 7
 mmsend replies --user alice --wait 30 :: 等 alice 回覆您最後一則私訊，最多等 30 分鐘
 mmsend read --user alice            :: 與 alice 最近 20 則訊息，雙方的都列，附件存到暫存資料夾（--limit 改則數）
+mmsend --user alice --reply <訊息ID> "訊息" :: 回覆 read 列出的某一則（傳進它的討論串）
 ```
 
 - `--channel` 用網址裡的名稱：`https://chat.example.com/<團隊>/channels/<頻道>`。

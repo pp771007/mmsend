@@ -184,16 +184,9 @@ fn own_message(args: &RepliesArgs, session: &mut Session, me: &str) -> Result<Po
             });
     }
     let post_id = match &args.post_id {
-        Some(id) => id.trim().to_owned(),
+        Some(id) => checked_post_id(id)?,
         None => last_sent()?.0,
     };
-    // The server answers a malformed id with a 400, which would read as a connection problem.
-    if post_id.len() != POST_ID_LENGTH || !post_id.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(Failure::new(
-            EXIT_USAGE,
-            format!("「{post_id}」不是訊息 ID：請用傳送成功時顯示的 {POST_ID_LENGTH} 碼英數字"),
-        ));
-    }
     let post = fetch_post(session, &post_id)?;
     if post.user_id != me {
         return Err(Failure::new(
@@ -204,7 +197,19 @@ fn own_message(args: &RepliesArgs, session: &mut Session, me: &str) -> Result<Po
     Ok(post)
 }
 
-fn fetch_post(session: &mut Session, post_id: &str) -> Result<Post, Failure> {
+/// The server answers a malformed id with a 400, which would read as a connection problem.
+pub(crate) fn checked_post_id(text: &str) -> Result<String, Failure> {
+    let post_id = text.trim();
+    if post_id.len() != POST_ID_LENGTH || !post_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(Failure::new(
+            EXIT_USAGE,
+            format!("「{post_id}」不是訊息 ID：請用傳送成功時或 mmsend read 顯示的 {POST_ID_LENGTH} 碼英數字"),
+        ));
+    }
+    Ok(post_id.to_owned())
+}
+
+pub(crate) fn fetch_post(session: &mut Session, post_id: &str) -> Result<Post, Failure> {
     with_retries(|| session.call(|c| c.post(post_id))).map_err(|e| match e {
         Error::Api(ApiError::NotFound) => {
             Failure::new(EXIT_TARGET_NOT_FOUND, format!("找不到訊息 {post_id}：可能已經刪除"))

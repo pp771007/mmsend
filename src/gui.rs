@@ -1209,6 +1209,7 @@ impl App {
                                     message: &message,
                                     pending_post_id: &pending_post_id,
                                     file_ids: &[],
+                                    root_id: "",
                                 })
                             })
                         })

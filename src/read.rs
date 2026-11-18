@@ -25,7 +25,8 @@ pub const READ: &str = "read";
 const DEFAULT_LIMIT: u16 = 20;
 /// One page from the server: more than enough to catch up before answering.
 const MAX_LIMIT: usize = POSTS_PER_PAGE;
-const ME_LABEL: &str = "我";
+/// How the user's own messages are shown, here and in a --reply dry run.
+pub(crate) const ME_LABEL: &str = "我";
 
 #[derive(Parser)]
 #[command(
@@ -150,14 +151,16 @@ fn render(
     let mut blocks = vec![format!("與 {with} 最近 {} 則訊息（由舊到新）：", posts.len())];
     for post in posts {
         // Indented, so a line someone wrote cannot pass for one of these headers.
-        let mut header = format!("{} {}", store::local_time(post.create_at), name(&post.user_id));
+        // The id is what `mmsend --reply` takes to answer this message.
+        let mut notes = vec![format!("訊息 ID：{}", post.id)];
         if !post.root_id.is_empty() {
-            header.push_str(&match starters.get(&post.root_id) {
-                Some((starter, summary)) if !summary.is_empty() => format!("（回覆 {} 的「{summary}」）", name(starter)),
-                Some((starter, _)) => format!("（回覆 {} 的訊息）", name(starter)),
-                None => "（討論串回覆）".to_owned(),
+            notes.push(match starters.get(&post.root_id) {
+                Some((starter, summary)) if !summary.is_empty() => format!("回覆 {} 的「{summary}」", name(starter)),
+                Some((starter, _)) => format!("回覆 {} 的訊息", name(starter)),
+                None => "討論串回覆".to_owned(),
             });
         }
+        let header = format!("{} {}（{}）", store::local_time(post.create_at), name(&post.user_id), notes.join("；"));
         let mut lines = vec![header];
         lines.extend(post.message.lines().map(|line| format!("  {line}")));
         for file in &post.metadata.files {
