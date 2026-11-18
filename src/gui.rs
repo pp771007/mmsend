@@ -510,6 +510,8 @@ enum Msg {
         manual: bool,
         result: Result<Version, String>,
     },
+    /// The update's download percentage, each time it changes.
+    UpdateProgress(u8),
     Updated(Version, Result<(), String>),
 }
 
@@ -740,8 +742,15 @@ struct Installation {
     available: Option<Version>,
     /// Installed from GitHub by this window; this running copy is still the old one.
     updated_to: Option<Version>,
-    updating: bool,
+    updating: Option<Updating>,
     checking: bool,
+}
+
+/// 更新 was clicked and has not finished. The download can take minutes on a slow
+/// line, so the button shows how far it has got.
+struct Updating {
+    /// `None` until the download reports one.
+    percent: Option<u8>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -832,7 +841,7 @@ impl App {
             installing: false,
             available: None,
             updated_to: None,
-            updating: false,
+            updating: None,
             checking: false,
         };
         let mut app = App {
@@ -1039,8 +1048,14 @@ impl App {
                 }
                 continue;
             }
+            if let Msg::UpdateProgress(percent) = msg {
+                if let Some(updating) = &mut self.installation.updating {
+                    updating.percent = Some(percent);
+                }
+                continue;
+            }
             if let Msg::Updated(version, result) = msg {
-                self.installation.updating = false;
+                self.installation.updating = None;
                 match result {
                     Ok(()) => {
                         self.installation.available = None;
@@ -1208,8 +1223,15 @@ impl App {
             Action::ShowError(text) => self.toast = Some(Toast::new(ToastKind::Error, text)),
             Action::CheckUpdate => self.check_update(true),
             Action::Update(version) => {
-                self.installation.updating = true;
-                self.spawn(move || Msg::Updated(version, update::download_and_install(version)));
+                self.installation.updating = Some(Updating { percent: None });
+                let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+                self.spawn(move || {
+                    let progress = |percent| {
+                        let _ = tx.send(Msg::UpdateProgress(percent));
+                        ctx.request_repaint();
+                    };
+                    Msg::Updated(version, update::download_and_install(version, progress))
+                });
             }
             Action::Restart => {
                 match install::launch_installed() {
@@ -2594,8 +2616,12 @@ fn install_banner(ui: &mut egui::Ui, installation: &Installation, p: &Palette, a
         |latest| !matches!(installation.state, InstallState::Newer(installed) if installed >= *latest),
     );
     if let Some(version) = available {
-        let label = if installation.updating { "更新中…" } else { "更新" };
-        let clicked = banner(ui, p, Icon::Download, label, !installation.updating, None, |ui| {
+        let label = match &installation.updating {
+            None => "更新".to_owned(),
+            Some(Updating { percent: None }) => "更新中…".to_owned(),
+            Some(Updating { percent: Some(percent) }) => format!("更新中 {percent}%"),
+        };
+        let clicked = banner(ui, p, Icon::Download, &label, installation.updating.is_none(), None, |ui| {
             ui.label(RichText::new(format!("有新版 v{version}")).color(p.text));
         });
         if clicked {
@@ -2707,7 +2733,7 @@ mod tests {
             installing: false,
             available: Some(installed),
             updated_to: None,
-            updating: false,
+            updating: None,
             checking: false,
         };
         let mut harness = Harness::builder().allow_missing_glyphs().build_ui(|ui| {

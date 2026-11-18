@@ -38,7 +38,7 @@ pub fn update() -> Result<String, Failure> {
     if latest <= Version::current() {
         return Ok(format!("已是最新版本 v{}", Version::current()));
     }
-    update::download_and_install(latest).map_err(|e| Failure::new(EXIT_OTHER, e))?;
+    update::download_and_install(latest, |_| {}).map_err(|e| Failure::new(EXIT_OTHER, e))?;
     let exe = install::installed_exe().map(|path| path.display().to_string()).unwrap_or_default();
     Ok(format!("已更新至 v{latest}：{exe}"))
 }

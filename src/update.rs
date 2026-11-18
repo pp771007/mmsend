@@ -2,6 +2,7 @@
 //! Only the window (at most daily) and `mmsend status` / `update` look; a send never
 //! does, since scheduled jobs often run with no network to spare.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -24,7 +25,12 @@ const DEV_RELEASES_VARIABLE: &str = "MMSEND_DEV_RELEASES_URL";
 const EXE_ASSET: &str = "mmsend.exe";
 const CHECKSUM_ASSET: &str = "mmsend.exe.sha256";
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a download may go without receiving anything. reqwest's blocking client
+/// applies its timeout to each wait (the request, then every read), so this is not a
+/// cap on the whole file: GitHub's file host has served the ~17 MB exe at ~50 KB/s,
+/// over five minutes, and a cap of that size failed every such update.
+const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 /// How long the window trusts its last look before asking GitHub again.
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const STATE_FILE: &str = "update.json";
@@ -50,7 +56,7 @@ fn client(timeout: Duration, redirect: Policy) -> Result<Client, String> {
 }
 
 fn download_client() -> Result<Client, String> {
-    client(DOWNLOAD_TIMEOUT, Policy::default())
+    client(DOWNLOAD_STALL_TIMEOUT, Policy::default())
 }
 
 /// The newest published version.
@@ -103,11 +109,13 @@ pub fn remember(latest: Version) {
 }
 
 /// Downloads `version`, checks it against its published SHA-256, and installs it.
-pub fn download_and_install(version: Version) -> Result<(), String> {
+/// `progress` gets the exe's download percentage each time it changes (only when
+/// the server says how big the file is).
+pub fn download_and_install(version: Version, progress: impl FnMut(u8)) -> Result<(), String> {
     let base = format!("{}/download/v{version}", releases_url());
     let client = download_client()?;
-    let exe = fetch(&client, &format!("{base}/{EXE_ASSET}"))?;
-    let checksum = String::from_utf8_lossy(&fetch(&client, &format!("{base}/{CHECKSUM_ASSET}"))?).into_owned();
+    let exe = fetch(&client, &format!("{base}/{EXE_ASSET}"), progress)?;
+    let checksum = String::from_utf8_lossy(&fetch(&client, &format!("{base}/{CHECKSUM_ASSET}"), |_| {})?).into_owned();
     let expected = checksum.split_whitespace().next().unwrap_or_default();
     if !sha256_hex(&exe).eq_ignore_ascii_case(expected) {
         return Err("下載的檔案與發佈的檢查碼不符，未更新".to_owned());
@@ -119,12 +127,43 @@ pub fn download_and_install(version: Version) -> Result<(), String> {
     result
 }
 
-fn fetch(client: &Client, url: &str) -> Result<Vec<u8>, String> {
-    let response = client.get(url).send().map_err(|e| format!("下載失敗：{e}"))?;
+/// Read piece by piece rather than with `bytes()`, which puts the whole body under
+/// one timeout; each `read` gets its own (see `DOWNLOAD_STALL_TIMEOUT`).
+fn fetch(client: &Client, url: &str, mut progress: impl FnMut(u8)) -> Result<Vec<u8>, String> {
+    let mut response = client.get(url).send().map_err(|e| format!("下載失敗：{e}"))?;
     if !response.status().is_success() {
         return Err(format!("下載失敗（HTTP {}）：{url}", response.status().as_u16()));
     }
-    response.bytes().map(|b| b.to_vec()).map_err(|e| format!("下載失敗：{e}"))
+    let total = response.content_length().filter(|&length| length > 0);
+    let mut body = Vec::with_capacity(total.unwrap_or_default() as usize);
+    let mut chunk = vec![0; DOWNLOAD_CHUNK_BYTES];
+    let mut reported = None;
+    loop {
+        let read = response.read(&mut chunk).map_err(|e| {
+            if stalled(&e) { STALLED_MESSAGE.to_owned() } else { format!("下載中斷：{e}") }
+        })?;
+        if read == 0 {
+            return Ok(body);
+        }
+        body.extend_from_slice(&chunk[..read]);
+        if let Some(total) = total {
+            let percent = (body.len() as u64 * 100 / total).min(100) as u8;
+            if reported != Some(percent) {
+                reported = Some(percent);
+                progress(percent);
+            }
+        }
+    }
+}
+
+/// reqwest's own wording for this is "error decoding response body".
+const STALLED_MESSAGE: &str = "下載中斷：太久沒有收到資料，請稍後再試";
+
+fn stalled(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+        .is_some_and(reqwest::Error::is_timeout)
 }
 
 fn download_path(version: Version) -> PathBuf {
@@ -164,7 +203,68 @@ mod tests {
             }
         });
         let url = format!("http://127.0.0.1:{port}/download/v9.9.9/mmsend.exe");
-        assert_eq!(fetch(&download_client().unwrap(), &url).unwrap(), b"exe");
+        assert_eq!(fetch(&download_client().unwrap(), &url, |_| {}).unwrap(), b"exe");
+        server.join().unwrap();
+    }
+
+    /// A slow but steady download finishes however long it takes in all; only a
+    /// stall ends it. (A whole-file limit failed every update on a slow line.)
+    #[test]
+    fn a_slow_download_that_keeps_arriving_is_not_cut_off() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        const BODY: &[u8] = b"exe!";
+        const STALL_LIMIT: Duration = Duration::from_millis(500);
+        const BYTE_INTERVAL: Duration = Duration::from_millis(300);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(&stream).read_line(&mut request_line).unwrap();
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", BODY.len());
+            stream.write_all(head.as_bytes()).unwrap();
+            // 4 bytes, 300 ms apart: 1.2 s in all, well past the 0.5 s limit.
+            for byte in BODY {
+                std::thread::sleep(BYTE_INTERVAL);
+                stream.write_all(&[*byte]).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let mut percents = Vec::new();
+        let client = client(STALL_LIMIT, Policy::default()).unwrap();
+        let body = fetch(&client, &format!("http://127.0.0.1:{port}/mmsend.exe"), |p| percents.push(p)).unwrap();
+        assert_eq!(body, BODY);
+        assert_eq!(percents.last(), Some(&100));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_download_that_stops_arriving_fails_and_says_so() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        const STALL_LIMIT: Duration = Duration::from_millis(300);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(&stream).read_line(&mut request_line).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nex")
+                .unwrap();
+            // Holds the connection open with half the body sent until the client gives up.
+            let _ = done_rx.recv();
+        });
+        let client = client(STALL_LIMIT, Policy::default()).unwrap();
+        let result = fetch(&client, &format!("http://127.0.0.1:{port}/mmsend.exe"), |_| {});
+        assert_eq!(result, Err(STALLED_MESSAGE.to_owned()));
+        done_tx.send(()).unwrap();
         server.join().unwrap();
     }
 
