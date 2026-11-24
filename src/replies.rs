@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, ArgGroup, Parser};
+use serde::{Deserialize, Serialize};
 
 use crate::api::{self, ApiError, Channel, FileInfo, POSTS_PER_PAGE, Post, PostList, Reaction};
 use crate::cli::{
@@ -39,12 +40,18 @@ const WAIT_INTERVAL: Duration = Duration::from_secs(30);
 const QUIET_PERIOD: Duration = Duration::from_secs(60);
 const MAX_WAIT_MINUTES: u64 = 24 * 60;
 const SECONDS_PER_MINUTE: u64 = 60;
+/// What `replies` has already shown, so --wait waits for what the reader has not
+/// seen: an answer that came before anyone looked is still news, while "let me
+/// check" seen an hour ago is not.
+const SEEN_FILE: &str = "replies-seen.json";
+/// Messages remembered; the oldest is dropped once more are asked about.
+const SEEN_KEEP: usize = 200;
 
 #[derive(Parser)]
 #[command(
     name = "mmsend replies",
     about = "列出別人對您傳的訊息的回覆與表情回應，附件下載到暫存資料夾。\n\
-             私訊與群組列出之後的所有訊息；頻道只列出那則訊息的討論串。還沒有回覆時結束代碼為 7。",
+             私訊與群組列出之後的所有訊息；頻道只列出那則訊息的討論串。還沒有回覆（--wait：沒有新回覆）時結束代碼為 7。",
     override_usage = "mmsend replies <訊息ID> [--wait <分鐘>]\n  \
                       mmsend replies --last\n  \
                       mmsend replies --user <帳號>      （或 --to、--channel、--group：您最後傳的那則）",
@@ -78,7 +85,7 @@ struct RepliesArgs {
     #[arg(long, value_name = "帳號,帳號")]
     group: Option<String>,
 
-    /// 最多等幾分鐘；有回覆後再 1 分鐘沒有新訊息就結束（適合在背景執行）
+    /// 最多等幾分鐘；等到還沒顯示過的回覆，再 1 分鐘沒有新訊息就結束（適合在背景執行）
     #[arg(long, value_name = "分鐘", value_parser = clap::value_parser!(u64).range(1..=MAX_WAIT_MINUTES))]
     wait: Option<u64>,
 
@@ -102,10 +109,55 @@ impl Answers {
         self.reactions.is_empty() && self.replies.is_empty()
     }
 
-    /// Whether anything came or went since `earlier`.
-    fn same_as(&self, earlier: &Answers) -> bool {
-        let ids = |answers: &Answers| answers.replies.iter().map(|reply| reply.id.clone()).collect::<Vec<_>>();
-        ids(self) == ids(earlier) && self.reactions.len() == earlier.reactions.len()
+    /// One key per reply and per reaction, to tell what came or went.
+    fn keys(&self) -> HashSet<String> {
+        self.replies
+            .iter()
+            .map(|reply| reply.id.clone())
+            .chain(self.reactions.iter().map(|r| format!("{}:{}", r.user_id, r.emoji_name)))
+            .collect()
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct SeenMessage {
+    post_id: String,
+    /// `Answers::keys` when last shown.
+    answers: HashSet<String>,
+}
+
+/// Oldest first.
+#[derive(Serialize, Deserialize, Default)]
+struct Seen {
+    messages: Vec<SeenMessage>,
+}
+
+impl Seen {
+    /// A broken or missing file only means --wait returns on what is already there,
+    /// as it did before anything was remembered; not a reason to fail.
+    fn load() -> Seen {
+        store::load_json(SEEN_FILE).ok().flatten().unwrap_or_default()
+    }
+
+    fn of(&self, post_id: &str) -> HashSet<String> {
+        self.messages
+            .iter()
+            .find(|message| message.post_id == post_id)
+            .map(|message| message.answers.clone())
+            .unwrap_or_default()
+    }
+
+    /// Read again first: another run (waiting on someone else) may have recorded
+    /// its message since this one started.
+    fn record(post_id: &str, answers: HashSet<String>) {
+        let mut seen = Seen::load();
+        seen.messages.retain(|message| message.post_id != post_id);
+        seen.messages.push(SeenMessage { post_id: post_id.to_owned(), answers });
+        let extra = seen.messages.len().saturating_sub(SEEN_KEEP);
+        seen.messages.drain(..extra);
+        // The answer is already in hand; failing to remember it only costs the next
+        // --wait an early return.
+        let _ = store::save_json(SEEN_FILE, &seen);
     }
 }
 
@@ -133,13 +185,17 @@ pub fn replies() -> Result<String, Failure> {
     let deadline = args
         .wait
         .map(|minutes| Instant::now() + Duration::from_secs(minutes * SECONDS_PER_MINUTE));
+    let seen = Seen::load().of(&mine.id);
     loop {
         let mut answers = gather(&mut session, &mine.id, &channel, &me)?;
-        if !answers.is_empty() {
+        let done = if deadline.is_some() { !answers.keys().is_subset(&seen) } else { !answers.is_empty() };
+        if done {
             if let Some(deadline) = deadline {
                 answers = until_quiet(&mut session, answers, deadline, &channel, &me)?;
             }
-            return Ok(render(&mut session, &answers, &channel, &me));
+            let output = render(&mut session, &answers, &channel, &me, &seen);
+            Seen::record(&mine.id, answers.keys());
+            return Ok(output);
         }
         match deadline {
             Some(deadline) if Instant::now() < deadline => {
@@ -147,7 +203,12 @@ pub fn replies() -> Result<String, Failure> {
             }
             _ => {
                 let problem = match args.wait {
-                    Some(minutes) => format!("等了 {minutes} 分鐘，還沒有回覆"),
+                    Some(minutes) if answers.is_empty() => format!("等了 {minutes} 分鐘，還沒有回覆"),
+                    // Whoever waits may not be whoever saw the earlier ones.
+                    Some(minutes) => format!(
+                        "等了 {minutes} 分鐘，沒有新的回覆（之前的回覆請執行 mmsend replies {} 查看）",
+                        mine.id
+                    ),
                     None => "還沒有回覆".to_owned(),
                 };
                 return Err(Failure::new(EXIT_NO_REPLIES, problem));
@@ -249,7 +310,7 @@ fn until_quiet(
         }
         std::thread::sleep(QUIET_PERIOD.min(deadline - now));
         let latest = gather(session, &answers.mine.id, channel, me)?;
-        if latest.same_as(&answers) {
+        if latest.keys() == answers.keys() {
             return Ok(latest);
         }
         answers = latest;
@@ -306,7 +367,8 @@ fn replies_in(lists: Vec<PostList>, me: &str, since: i64) -> Vec<Post> {
     replies
 }
 
-fn render(session: &mut Session, answers: &Answers, channel: &Channel, me: &str) -> String {
+/// `seen`: what was shown before, so the replies that came since stand out.
+fn render(session: &mut Session, answers: &Answers, channel: &Channel, me: &str, seen: &HashSet<String>) -> String {
     // A direct channel is named `<user id>__<user id>`.
     let other = (channel.kind == api::CHANNEL_DIRECT)
         .then(|| channel.name.split("__").find(|id| *id != me).unwrap_or(me).to_owned());
@@ -364,7 +426,9 @@ fn render(session: &mut Session, answers: &Answers, channel: &Channel, me: &str)
     let mut taken = HashSet::new();
     for reply in &answers.replies {
         // Indented, so a line someone wrote cannot pass for one of these headers.
-        let mut lines = vec![format!("{} {}", store::local_time(reply.create_at), name(&reply.user_id))];
+        // Marked only beside replies shown before: when all of them are new, none need it.
+        let new = if !seen.is_empty() && !seen.contains(&reply.id) { "（新）" } else { "" };
+        let mut lines = vec![format!("{} {}{new}", store::local_time(reply.create_at), name(&reply.user_id))];
         lines.extend(reply.message.lines().map(|line| format!("  {line}")));
         for file in &reply.metadata.files {
             lines.push(match save_attachment(session, &folder, file, &mut taken) {

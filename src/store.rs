@@ -189,7 +189,16 @@ pub fn save_json<T: Serialize>(file: &str, value: &T) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("無法建立 {}：{e}", dir.display()))?;
     let path = dir.join(file);
     let json = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| format!("無法寫入 {}：{e}", path.display()))
+    // Written beside it and swapped in: two runs writing at once would otherwise
+    // both truncate and then both write, leaving the longer one's tail after the
+    // shorter one, which no longer parses.
+    let staging = dir.join(format!("{file}.{}.tmp", std::process::id()));
+    std::fs::write(&staging, json)
+        .and_then(|()| std::fs::rename(&staging, &path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&staging);
+            format!("無法寫入 {}：{e}", path.display())
+        })
 }
 
 pub fn load_config() -> Result<Option<Config>, String> {
